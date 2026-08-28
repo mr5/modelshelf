@@ -8,7 +8,6 @@ services:
     restart: unless-stopped
     environment:
       MODELSHELF_STORAGE_ROOT: /data
-      MODELSHELF_CATALOG_INDEX_PATH: ${MODELSHELF_CATALOG_INDEX_PATH:-/data/.modelshelf/catalog.sqlite3}
       MODELSHELF_IMPORT_ROOTS: ${MODELSHELF_IMPORT_ROOTS:-}
       MODELSHELF_UI_DIST: /app/ui
       MODELSHELF_CLIENT_DIST: /app/client

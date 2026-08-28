@@ -46,10 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_import(arguments: argparse.Namespace, settings: Settings) -> dict[str, object]:
     storage_root = settings.storage_root.resolve()
-    index_path = (
-        settings.catalog_index_path.resolve() if settings.catalog_index_path is not None else None
-    )
-    catalog = Catalog(storage_root, index_path=index_path)
+    catalog = Catalog(storage_root)
     catalog.initialize()
     roots = allowed_import_roots(catalog, settings.import_roots)
     result = import_filesystem(

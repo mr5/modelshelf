@@ -122,7 +122,10 @@ only artifact source of truth: publication completes with the filesystem rename 
 a best-effort index upsert. Startup reconciles missing/stale rows from manifests, removes rows whose
 artifacts disappeared, and preserves then rebuilds a corrupt or incompatible database. The index
 does not store `relativePath`; that path is deterministically generated from provider, source ID and
-resolved revision. Keep `MODELSHELF_CATALOG_INDEX_PATH` on server-local POSIX storage, never on NFS.
+resolved revision. Its location is fixed at
+`<MODELSHELF_STORAGE_ROOT>/.modelshelf/catalog.sqlite3`; it has no separate configuration because it
+belongs to the shelf metadata for that storage root. The NFS exporter exposes only the sibling
+`artifacts/` directory, never `.modelshelf/`, staging, incoming files, or task state.
 The artifact API accepts optional `limit` and `offset` parameters, and the UI loads 48 cards at a
 time. Existing clients that omit pagination remain compatible.
 

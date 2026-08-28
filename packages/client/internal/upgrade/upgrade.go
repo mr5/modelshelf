@@ -78,7 +78,7 @@ func LatestGitHubVersion(
 	if client == nil {
 		client = http.DefaultClient
 	}
-	requestURL := strings.TrimRight(apiBase, "/") + "/repos/" + repository + "/releases/latest"
+	requestURL := strings.TrimRight(apiBase, "/") + "/repos/" + repository + "/releases?per_page=1"
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("create GitHub release request: %w", err)
@@ -101,16 +101,19 @@ func LatestGitHubVersion(
 			strings.TrimSpace(string(detail)),
 		)
 	}
-	var payload struct {
+	var payload []struct {
 		TagName string `json:"tag_name"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxMetadataSize)).Decode(&payload); err != nil {
 		return "", fmt.Errorf("decode latest GitHub release: %w", err)
 	}
-	if !safeReleaseName(payload.TagName) {
+	if len(payload) == 0 {
+		return "", errors.New("GitHub repository has no published releases")
+	}
+	if !safeReleaseName(payload[0].TagName) {
 		return "", errors.New("GitHub returned an invalid release tag")
 	}
-	return payload.TagName, nil
+	return payload[0].TagName, nil
 }
 
 func Install(ctx context.Context, release Release, options Options) error {

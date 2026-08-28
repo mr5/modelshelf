@@ -32,7 +32,17 @@ if [ -n "${MODELSHELF_VERSION:-}" ]; then
   esac
   modelshelf_github_base="https://github.com/$modelshelf_repo/releases/download/$MODELSHELF_VERSION"
 else
-  modelshelf_github_base="https://github.com/$modelshelf_repo/releases/latest/download"
+  modelshelf_release_json=$(curl -fsSL --retry 3 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'User-Agent: modelshelf-installer' \
+    "https://api.github.com/repos/$modelshelf_repo/releases?per_page=1") ||
+    fail "cannot resolve the newest GitHub release; set MODELSHELF_VERSION explicitly"
+  modelshelf_version=$(printf '%s\n' "$modelshelf_release_json" | sed -n \
+    's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+  case "$modelshelf_version" in
+    *[!A-Za-z0-9._-]*|'') fail "GitHub returned an invalid or empty release tag" ;;
+  esac
+  modelshelf_github_base="https://github.com/$modelshelf_repo/releases/download/$modelshelf_version"
 fi
 modelshelf_download_base=${MODELSHELF_CLIENT_DOWNLOAD_BASE:-${MODELSHELF_SERVER_DOWNLOAD_BASE:-$modelshelf_github_base}}
 modelshelf_install_dir=${MODELSHELF_INSTALL_DIR:-/usr/local/bin}

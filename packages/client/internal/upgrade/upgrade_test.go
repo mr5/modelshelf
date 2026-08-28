@@ -92,7 +92,7 @@ func TestCompareVersions(t *testing.T) {
 
 func TestLatestGitHubVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/repos/mr5/modelshelf/releases/latest" {
+		if request.URL.Path != "/repos/mr5/modelshelf/releases" || request.URL.Query().Get("per_page") != "1" {
 			http.NotFound(writer, request)
 			return
 		}
@@ -100,7 +100,7 @@ func TestLatestGitHubVersion(t *testing.T) {
 			t.Errorf("authorization = %q", request.Header.Get("Authorization"))
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"tag_name":"v1.2.0"}`))
+		_, _ = writer.Write([]byte(`[{"tag_name":"v1.2.0","prerelease":true}]`))
 	}))
 	defer server.Close()
 	version, err := LatestGitHubVersion(

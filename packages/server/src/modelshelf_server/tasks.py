@@ -25,7 +25,7 @@ from modelshelf_core.identity import artifact_identity
 from modelshelf_core.schema import load_task_json
 
 from .archive import extract_archive, infer_metadata
-from .providers import run_provider
+from .providers import provider_failure_detail, run_provider
 
 
 @dataclass(frozen=True)
@@ -718,7 +718,7 @@ class TaskManager:
             await self._update(
                 task_id,
                 status=TaskStatus.FAILED,
-                error=str(error),
+                error=provider_failure_detail(task.provider, "download task", error),
                 instantaneous_bytes_per_second=0,
                 eta_seconds=None,
             )

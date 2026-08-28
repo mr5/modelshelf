@@ -15,7 +15,10 @@ export function TaskPage({ taskId }: { taskId: string }) {
     async function load() {
       try {
         const item = await api<DownloadTask>(`/tasks/${taskId}`);
-        if (active) setTask(item);
+        if (active) {
+          setTask(item);
+          setError("");
+        }
       } catch (cause) {
         if (active) setError(cause instanceof Error ? cause.message : String(cause));
       }

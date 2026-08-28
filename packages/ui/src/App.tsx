@@ -11,15 +11,28 @@ import type { ServerInfo } from "./types.ts";
 export function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [publicArtifacts, setPublicArtifacts] = useState<boolean | null>(null);
+  const [bootstrapError, setBootstrapError] = useState("");
   useEffect(() => {
-    void Promise.all([
-      api<{ authenticated: boolean }>("/auth/session").catch(() => ({ authenticated: false })),
-      api<ServerInfo>("/info").catch(() => null),
-    ]).then(([session, info]) => {
-      setAuthenticated(session.authenticated);
-      setPublicArtifacts(info?.publicArtifacts ?? false);
-    });
+    async function initialize() {
+      try {
+        const [session, info] = await Promise.all([
+          api<{ authenticated: boolean }>("/auth/session"),
+          api<ServerInfo>("/info"),
+        ]);
+        setAuthenticated(session.authenticated);
+        setPublicArtifacts(info.publicArtifacts);
+      } catch (cause) {
+        setBootstrapError(cause instanceof Error ? cause.message : String(cause));
+      }
+    }
+    void initialize();
   }, []);
+  if (bootstrapError) {
+    return <div className="boot">
+      <div className="error-box"><strong>Could not open ModelShelf</strong><span>{bootstrapError}</span></div>
+      <button onClick={() => window.location.reload()}>Retry</button>
+    </div>;
+  }
   if (authenticated === null || publicArtifacts === null) return <div className="boot">Opening the shelf…</div>;
   const defaultPath = authenticated ? "/tasks" : publicArtifacts ? "/artifacts" : "/login";
   return (
@@ -54,10 +67,16 @@ function ArtifactAccess({ authenticated, publicArtifacts }: { authenticated: boo
 
 function Shell({ authenticated, publicArtifacts, onLogout }: { authenticated: boolean; publicArtifacts: boolean; onLogout: () => void }) {
   const navigate = useNavigate();
+  const [error, setError] = useState("");
   async function logout() {
-    await api("/auth/logout", { method: "POST" });
-    onLogout();
-    navigate(publicArtifacts ? "/artifacts" : "/login");
+    setError("");
+    try {
+      await api("/auth/logout", { method: "POST" });
+      onLogout();
+      navigate(publicArtifacts ? "/artifacts" : "/login");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
   return (
     <div className="shell">
@@ -75,7 +94,10 @@ function Shell({ authenticated, publicArtifacts, onLogout }: { authenticated: bo
           ? <button className="ghost small" onClick={() => void logout()}>Sign out</button>
           : <NavLink className="ghost small button" to="/login">Sign in</NavLink>}
       </header>
-      <main><Outlet /></main>
+      <main>
+        {error && <div className="page"><div className="error-box">Sign out failed: {error}</div></div>}
+        <Outlet />
+      </main>
     </div>
   );
 }

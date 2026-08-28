@@ -45,6 +45,7 @@ from .providers import (
     RevisionDiscovery,
     discover_revisions,
     estimate_download,
+    provider_failure_detail,
     search_models,
 )
 from .tasks import TaskManager
@@ -249,28 +250,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 disable_proxy,
             )
         except ValueError as error:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                provider_failure_detail(provider, "download preflight", error),
+            ) from error
         except ProviderUnavailable as error:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                provider_failure_detail(provider, "download preflight", error),
+            ) from error
         except ProviderRequestError as error:
-            raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(error)) from error
+            raise HTTPException(
+                status.HTTP_424_FAILED_DEPENDENCY,
+                provider_failure_detail(provider, "download preflight", error),
+            ) from error
         except Exception as error:
             upstream_status = getattr(error, "status_code", None) or getattr(
                 getattr(error, "response", None), "status_code", None
             )
-            if upstream_status == status.HTTP_404_NOT_FOUND:
-                raise HTTPException(
-                    status.HTTP_404_NOT_FOUND,
-                    "model, release, or requested revision not found",
-                ) from error
-            if isinstance(upstream_status, int):
-                raise HTTPException(
-                    status.HTTP_502_BAD_GATEWAY,
-                    f"upstream Hub returned HTTP {upstream_status}",
-                ) from error
+            response_status = (
+                status.HTTP_404_NOT_FOUND
+                if upstream_status == status.HTTP_404_NOT_FOUND
+                else status.HTTP_502_BAD_GATEWAY
+            )
             raise HTTPException(
-                status.HTTP_502_BAD_GATEWAY,
-                f"{provider.value} download preflight failed",
+                response_status,
+                provider_failure_detail(provider, "download preflight", error),
             ) from error
 
     @asynccontextmanager
@@ -446,28 +451,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             result = await cached_revisions(provider, source_id.strip())
         except ValueError as error:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                provider_failure_detail(provider, "revision discovery", error),
+            ) from error
         except ProviderUnavailable as error:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                provider_failure_detail(provider, "revision discovery", error),
+            ) from error
         except ProviderRequestError as error:
-            raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(error)) from error
+            raise HTTPException(
+                status.HTTP_424_FAILED_DEPENDENCY,
+                provider_failure_detail(provider, "revision discovery", error),
+            ) from error
         except httpx.HTTPStatusError as error:
             upstream_status = error.response.status_code
-            detail = (
-                "model or repository not found"
-                if upstream_status == status.HTTP_404_NOT_FOUND
-                else f"upstream Hub returned HTTP {upstream_status}"
-            )
             response_status = (
                 status.HTTP_404_NOT_FOUND
                 if upstream_status == status.HTTP_404_NOT_FOUND
                 else status.HTTP_502_BAD_GATEWAY
             )
-            raise HTTPException(response_status, detail) from error
+            raise HTTPException(
+                response_status,
+                provider_failure_detail(provider, "revision discovery", error),
+            ) from error
         except Exception as error:
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,
-                f"{provider.value} revision discovery failed",
+                provider_failure_detail(provider, "revision discovery", error),
             ) from error
         return result.as_dict()
 
@@ -479,19 +491,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             result = await cached_models(provider, query.strip())
         except ValueError as error:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                provider_failure_detail(provider, "model search", error),
+            ) from error
         except ProviderUnavailable as error:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                provider_failure_detail(provider, "model search", error),
+            ) from error
         except ProviderRequestError as error:
-            raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(error)) from error
+            raise HTTPException(
+                status.HTTP_424_FAILED_DEPENDENCY,
+                provider_failure_detail(provider, "model search", error),
+            ) from error
         except httpx.HTTPStatusError as error:
-            upstream_status = error.response.status_code
-            detail = f"upstream Hub returned HTTP {upstream_status}"
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail) from error
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                provider_failure_detail(provider, "model search", error),
+            ) from error
         except Exception as error:
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,
-                f"{provider.value} model search failed",
+                provider_failure_detail(provider, "model search", error),
             ) from error
         return result.as_dict()
 

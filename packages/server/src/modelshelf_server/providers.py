@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -148,6 +148,61 @@ class IsolatedProviderError(RuntimeError):
     def __init__(self, message: str, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+_PROVIDER_LABELS = {
+    Provider.HUGGINGFACE: "Hugging Face",
+    Provider.MODELSCOPE_CN: "ModelScope CN",
+    Provider.MODELSCOPE_AI: "ModelScope AI",
+    Provider.GITHUB_RELEASE: "GitHub Releases",
+    Provider.KAGGLE: "Kaggle",
+    Provider.HTTP: "Generic HTTP",
+    Provider.FILESYSTEM: "Filesystem",
+}
+_SECRET_ENV_MARKERS = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "APIKEY")
+
+
+def safe_error_message(error: BaseException | str, *, secrets: Iterable[str] = ()) -> str:
+    """Return useful error detail without echoing credentials or unbounded upstream bodies."""
+
+    message = str(error).strip()
+    if not message and isinstance(error, BaseException):
+        message = type(error).__name__
+    for name, value in os.environ.items():
+        secret_name = any(marker in name.upper() for marker in _SECRET_ENV_MARKERS)
+        if value and len(value) >= 4 and secret_name:
+            message = message.replace(value, "[redacted]")
+    for secret in secrets:
+        if secret and len(secret) >= 4:
+            message = message.replace(secret, "[redacted]")
+    message = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[redacted]@", message)
+    message = re.sub(
+        r"(?i)(\b(?:authorization|proxy-authorization)\s*[:=]\s*)(?:bearer|basic)?\s*[^\s,;]+",
+        r"\1[redacted]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)([?&](?:access_token|api[_-]?key|token|signature|sig|x-amz-signature)=)[^&\s]+",
+        r"\1[redacted]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(\b(?:password|passwd|token|secret|api[_-]?key)\s*[:=]\s*)[^\s,;]+",
+        r"\1[redacted]",
+        message,
+    )
+    return message[:4_000] or "unknown error"
+
+
+def provider_failure_detail(provider: Provider, operation: str, error: BaseException) -> str:
+    """Build a user-visible provider failure that retains the original cause."""
+
+    message = safe_error_message(error)
+    error_type = type(error).__name__
+    label = _PROVIDER_LABELS.get(provider, provider.value)
+    if isinstance(error, (ProviderRequestError, ProviderUnavailable, ValueError)):
+        return f"{label} {operation} failed: {message}"
+    return f"{label} {operation} failed ({error_type}): {message}"
 
 
 def _provider_endpoint(provider: Provider, mirror: str | None, disable_mirror: bool) -> str | None:
@@ -876,7 +931,9 @@ def _direct_worker_environment() -> dict[str, str]:
 
 
 def _worker_error(record: dict[str, Any]) -> Exception:
-    message = str(record.get("message") or "isolated provider operation failed")
+    message = safe_error_message(
+        str(record.get("message") or "isolated provider operation failed")
+    )
     kind = record.get("errorKind")
     if kind == "ValueError":
         return ValueError(message)
@@ -885,9 +942,20 @@ def _worker_error(record: dict[str, Any]) -> Exception:
     if kind == "ProviderRequestError":
         return ProviderRequestError(message)
     status_code = record.get("statusCode")
+    if isinstance(kind, str) and kind:
+        message = f"{kind}: {message}"
     return IsolatedProviderError(
         message,
         status_code if isinstance(status_code, int) else None,
+    )
+
+
+def _worker_process_error(operation: str, returncode: int | None, stderr: bytes) -> Exception:
+    detail = safe_error_message(stderr.decode(errors="replace").strip())
+    if detail == "unknown error":
+        detail = "worker exited without a structured error record"
+    return IsolatedProviderError(
+        f"isolated provider {operation} failed (exit code {returncode}): {detail}"
     )
 
 
@@ -940,19 +1008,24 @@ async def _isolated_estimate(
         stderr=asyncio.subprocess.PIPE,
         env=_direct_worker_environment(),
     )
-    stdout, _stderr = await process.communicate(json.dumps(payload).encode())
-    records = [
-        json.loads(line.removeprefix(_WORKER_PREFIX))
-        for line in stdout.decode().splitlines()
-        if line.startswith(_WORKER_PREFIX)
-    ]
+    stdout, stderr = await process.communicate(json.dumps(payload).encode())
+    try:
+        records = [
+            json.loads(line.removeprefix(_WORKER_PREFIX))
+            for line in stdout.decode(errors="replace").splitlines()
+            if line.startswith(_WORKER_PREFIX)
+        ]
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise IsolatedProviderError(
+            f"isolated provider preflight returned an invalid result: {safe_error_message(error)}"
+        ) from error
     if not records:
-        raise IsolatedProviderError("isolated provider preflight produced no result")
+        raise _worker_process_error("preflight", process.returncode, stderr)
     record = records[-1]
     if record.get("type") == "error":
         raise _worker_error(record)
     if process.returncode != 0 or record.get("type") != "result":
-        raise IsolatedProviderError("isolated provider preflight failed")
+        raise _worker_process_error("preflight", process.returncode, stderr)
     return _estimate_from_dict(record["estimate"])
 
 
@@ -999,18 +1072,25 @@ async def _isolated_download(
     process.stdin.close()
     stderr_task = asyncio.create_task(process.stderr.read())
     final: dict[str, Any] | None = None
+    stderr = b""
     try:
         while line := await process.stdout.readline():
             decoded = line.decode().strip()
             if not decoded.startswith(_WORKER_PREFIX):
                 continue
-            record = json.loads(decoded.removeprefix(_WORKER_PREFIX))
+            try:
+                record = json.loads(decoded.removeprefix(_WORKER_PREFIX))
+            except json.JSONDecodeError as error:
+                raise IsolatedProviderError(
+                    "isolated provider download returned an invalid result: "
+                    f"{safe_error_message(error)}"
+                ) from error
             if record.get("type") == "progress":
                 await progress(int(record["downloaded"]), record.get("total"))
             else:
                 final = record
         await process.wait()
-        await stderr_task
+        stderr = await stderr_task
     except asyncio.CancelledError:
         if process.returncode is None:
             process.terminate()
@@ -1026,7 +1106,7 @@ async def _isolated_download(
     if final and final.get("type") == "error":
         raise _worker_error(final)
     if process.returncode != 0 or not final or final.get("type") != "result":
-        raise IsolatedProviderError("isolated provider download failed")
+        raise _worker_process_error("download", process.returncode, stderr)
     result = final["result"]
     return ProviderResult(
         resolved_revision=str(result["resolvedRevision"]),
@@ -1151,17 +1231,9 @@ async def download_modelscope(
 ) -> ProviderResult:
     cache = destination.parent / ".modelscope-cache"
     try:
-        from modelscope_hub.compat import LegacyHubApi, snapshot_download
+        from modelscope_hub.compat import snapshot_download
     except ImportError as error:
         raise _optional_import_error("ModelScope", "modelscope-hub", error) from error
-    api = LegacyHubApi(endpoint=endpoint, token=token)
-    try:
-        await asyncio.to_thread(api.get_valid_revision_detail, source_id, revision)
-    except Exception as error:
-        translated = _translate_modelscope_error(error, provider=provider, endpoint=endpoint)
-        if translated:
-            raise translated from error
-        raise
     resolved = await _resolve_modelscope_revision(
         provider, source_id, revision, endpoint=endpoint, token=token
     )

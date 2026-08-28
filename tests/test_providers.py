@@ -139,6 +139,74 @@ def test_modelscope_revision_resolution_uses_token_after_anonymous_failure(
     assert "private-token" not in " ".join(str(argument) for argument in calls[1][0])
 
 
+def test_modelscope_download_uses_an_immutable_commit_without_legacy_revision_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = "e823e888ae179eb3be02c1a48899c4f828371376"
+    captured: dict[str, object] = {}
+
+    def snapshot_download(**kwargs: object) -> str:
+        captured.update(kwargs)
+        destination = Path(str(kwargs["local_dir"]))
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "config.json").write_text("{}", encoding="utf-8")
+        return str(destination)
+
+    async def blocking_download(
+        operation: object, _destination: Path, _progress: object
+    ) -> str:
+        assert callable(operation)
+        return str(operation())
+
+    monkeypatch.setattr("modelscope_hub.compat.snapshot_download", snapshot_download)
+    monkeypatch.setattr(provider_module, "_blocking_download", blocking_download)
+
+    result = asyncio.run(
+        provider_module.download_modelscope(
+            Provider.MODELSCOPE_CN,
+            "Qwen/Qwen3.8-27B",
+            resolved,
+            tmp_path / "artifact",
+            lambda _downloaded, _total: asyncio.sleep(0),
+            "https://modelscope.cn",
+            None,
+        )
+    )
+
+    assert result.resolved_revision == resolved
+    assert captured["revision"] == resolved
+    assert captured["model_id"] == "Qwen/Qwen3.8-27B"
+
+
+def test_provider_error_detail_keeps_the_cause_and_redacts_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "hf_private_token_value")
+    error = RuntimeError(
+        "connection failed for https://user:password@proxy.example/path"
+        "?access_token=hf_private_token_value"
+    )
+
+    detail = provider_module.provider_failure_detail(
+        Provider.HUGGINGFACE, "model search", error
+    )
+
+    assert "RuntimeError" in detail
+    assert "connection failed" in detail
+    assert "hf_private_token_value" not in detail
+    assert "user:password" not in detail
+    assert "[redacted]" in detail
+
+
+def test_worker_process_error_includes_stderr() -> None:
+    error = provider_module._worker_process_error(
+        "preflight", 2, b"ImportError: provider dependency is broken"
+    )
+
+    assert "exit code 2" in str(error)
+    assert "ImportError: provider dependency is broken" in str(error)
+
+
 def test_sdk_downloads_use_a_supervised_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "modelshelf-core"
-version = "0.1.0b2"
+version = "0.1.0b3"
 description = "Shared filesystem catalog and manifest primitives for ModelShelf"
 requires-python = ">=3.12"
 dependencies = ["pydantic>=2.11,<3"]

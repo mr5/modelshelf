@@ -273,6 +273,42 @@ def test_provider_search_and_revision_discovery_are_authenticated_and_cached(
     assert calls == {"models": 1, "revisions": 1, "estimates": 1}
 
 
+def test_provider_api_returns_the_original_sanitized_failure_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "hf_private_token_value"
+    monkeypatch.setenv("HF_TOKEN", secret)
+
+    async def failed_search(
+        _provider: Provider, _query: str, *, github_token: str | None, **_network: object
+    ) -> ModelSearch:
+        assert github_token is None
+        raise RuntimeError(
+            f"DNS lookup failed through https://user:password@proxy.invalid?token={secret}"
+        )
+
+    monkeypatch.setattr(app_module, "search_models", failed_search)
+    settings = Settings(
+        storage_root=tmp_path / "storage",
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.get(
+            "/api/v1/providers/huggingface/models",
+            params={"q": "qwen"},
+            headers={"Authorization": "Bearer write-token"},
+        )
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "Hugging Face model search failed (RuntimeError)" in detail
+    assert "DNS lookup failed" in detail
+    assert secret not in detail
+    assert "user:password" not in detail
+    assert "[redacted]" in detail
+
+
 def test_estimate_reports_an_existing_immutable_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -367,7 +403,9 @@ def test_task_creation_rejects_a_failed_download_preflight(
             headers={"Authorization": "Bearer write-token"},
         )
         assert response.status_code == 422
-        assert response.json()["detail"] == "requested revision was not found"
+        assert response.json()["detail"] == (
+            "Hugging Face download preflight failed: requested revision was not found"
+        )
         assert (
             client.get("/api/v1/tasks", headers={"Authorization": "Bearer write-token"}).json()
             == []
@@ -389,7 +427,8 @@ def test_filesystem_artifacts_cannot_be_created_as_download_tasks(tmp_path: Path
 
     assert response.status_code == 422
     assert response.json()["detail"] == (
-        "filesystem artifacts must be created with modelshelf-server import"
+        "Filesystem download preflight failed: filesystem artifacts must be created with "
+        "modelshelf-server import"
     )
 
 

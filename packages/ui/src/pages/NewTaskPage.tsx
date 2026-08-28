@@ -58,6 +58,7 @@ export function NewTaskPage() {
   const [modelLookupError, setModelLookupError] = useState("");
   const [revisionLookupError, setRevisionLookupError] = useState("");
   const [estimateError, setEstimateError] = useState("");
+  const [serverInfoError, setServerInfoError] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const revisionEdited = useRef(false);
@@ -71,7 +72,15 @@ export function NewTaskPage() {
   }
 
   useEffect(() => {
-    void api<ServerInfo>("/info").then(setServerInfo).catch(() => setServerInfo(null));
+    void api<ServerInfo>("/info")
+      .then((info) => {
+        setServerInfo(info);
+        setServerInfoError("");
+      })
+      .catch((cause) => {
+        setServerInfo(null);
+        setServerInfoError(cause instanceof Error ? cause.message : String(cause));
+      });
   }, []);
 
   useEffect(() => {
@@ -216,6 +225,7 @@ export function NewTaskPage() {
   return <div className="page narrow">
     <Link className="back" to="/tasks">← Downloads</Link>
     <div className="page-head"><div><p className="eyebrow">New ingestion</p><h1>Download a model</h1></div></div>
+    {serverInfoError && <div className="error-box">Could not load server network settings: {serverInfoError}</div>}
     <form className="panel form-panel" onSubmit={(event) => void submit(event)}>
       <label>Source
         <select value={provider} onChange={(event) => {

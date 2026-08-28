@@ -21,24 +21,41 @@ function platformName(os: string, arch: string) {
 
 function CopyBlock({ value, multiline = false }: { value: string; multiline?: boolean }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const [error, setError] = useState("");
 
   async function copy() {
+    setError("");
     try {
       if (!navigator.clipboard) throw new Error("clipboard API unavailable");
       await navigator.clipboard.writeText(value);
       setState("copied");
-    } catch {
-      const input = document.createElement("textarea");
-      input.value = value;
-      input.style.position = "fixed";
-      input.style.opacity = "0";
-      document.body.append(input);
-      input.select();
-      const succeeded = document.execCommand("copy");
-      input.remove();
-      setState(succeeded ? "copied" : "failed");
+    } catch (cause) {
+      try {
+        const input = document.createElement("textarea");
+        input.value = value;
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.append(input);
+        input.select();
+        const succeeded = document.execCommand("copy");
+        input.remove();
+        setState(succeeded ? "copied" : "failed");
+        if (!succeeded) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      } catch (fallbackCause) {
+        setState("failed");
+        const primary = cause instanceof Error ? cause.message : String(cause);
+        const fallback = fallbackCause instanceof Error
+          ? fallbackCause.message
+          : String(fallbackCause);
+        setError(`${primary}; fallback copy failed: ${fallback}`);
+      }
     }
-    window.setTimeout(() => setState("idle"), 1800);
+    window.setTimeout(() => {
+      setState("idle");
+      setError("");
+    }, 1800);
   }
 
   return <div className={`copy-block${multiline ? " multiline" : ""}`}>
@@ -46,6 +63,7 @@ function CopyBlock({ value, multiline = false }: { value: string; multiline?: bo
     <button className="small" type="button" onClick={() => void copy()}>
       {state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy"}
     </button>
+    {error && <span className="lookup-error">Clipboard copy failed: {error}</span>}
   </div>;
 }
 

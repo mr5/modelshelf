@@ -8,18 +8,24 @@ export function TasksPage() {
   const { id: selectedTaskId } = useParams();
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
   const [limits, setLimits] = useState<ServerInfo["downloads"]>();
-  const [error, setError] = useState("");
+  const [tasksError, setTasksError] = useState("");
+  const [infoError, setInfoError] = useState("");
   useEffect(() => {
     let active = true;
     void api<ServerInfo>("/info")
       .then((info) => { if (active) setLimits(info.downloads); })
-      .catch(() => undefined);
+      .catch((cause) => {
+        if (active) setInfoError(`Could not load download limits: ${cause instanceof Error ? cause.message : String(cause)}`);
+      });
     async function load() {
       try {
         const result = await api<DownloadTask[]>("/tasks");
-        if (active) setTasks(result);
+        if (active) {
+          setTasks(result);
+          setTasksError("");
+        }
       } catch (cause) {
-        if (active) setError(cause instanceof Error ? cause.message : String(cause));
+        if (active) setTasksError(cause instanceof Error ? cause.message : String(cause));
       }
     }
     void load();
@@ -32,7 +38,8 @@ export function TasksPage() {
         <div><p className="eyebrow">Ingestion queue</p><h1>Downloads</h1><p className="muted">Every request resolves to an immutable revision before publication.{limits && ` Up to ${limits.maxConcurrent} tasks run at once, with ${limits.maxConcurrentPerSource} per source.`}</p></div>
         <Link className="button" to="/tasks/new">New download</Link>
       </div>
-      {error && <div className="error-box">{error}</div>}
+      {infoError && <div className="error-box">{infoError}</div>}
+      {tasksError && <div className="error-box">Could not refresh downloads: {tasksError}</div>}
       <section className="panel table-panel">
         <table className="tasks-table">
           <colgroup><col className="source-column" /><col className="status-column" /><col className="revision-column" /><col className="progress-column" /><col className="updated-column" /></colgroup>

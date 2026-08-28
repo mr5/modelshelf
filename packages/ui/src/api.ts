@@ -8,16 +8,39 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api/v1${path}`, {
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...init?.headers },
-    ...init,
-  });
-  if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { detail?: string; error?: string };
-    throw new ApiError(body.detail ?? body.error ?? `HTTP ${response.status}`, response.status);
+  const method = init?.method ?? "GET";
+  let response: Response;
+  try {
+    response = await fetch(`/api/v1${path}`, {
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...init?.headers },
+      ...init,
+    });
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    throw new Error(`${method} ${path} could not reach ModelShelf: ${detail}`, { cause });
   }
-  return response.json() as Promise<T>;
+  if (!response.ok) {
+    const raw = await response.text();
+    let detail = "";
+    if (raw) {
+      try {
+        const body = JSON.parse(raw) as { detail?: unknown; error?: unknown };
+        const candidate = body.detail ?? body.error;
+        detail = typeof candidate === "string" ? candidate : JSON.stringify(candidate);
+      } catch {
+        detail = raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+      }
+    }
+    const reason = detail || response.statusText || "request failed without a response body";
+    throw new ApiError(`${method} ${path} returned HTTP ${response.status}: ${reason.slice(0, 4_000)}`, response.status);
+  }
+  try {
+    return await response.json() as T;
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    throw new Error(`${method} ${path} returned invalid JSON: ${detail}`, { cause });
+  }
 }
 
 export function formatBytes(value: number): string {

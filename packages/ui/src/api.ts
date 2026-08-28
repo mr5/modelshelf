@@ -17,6 +17,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
     });
   } catch (cause) {
+    if (cause instanceof DOMException && ["AbortError", "TimeoutError"].includes(cause.name)) {
+      throw cause;
+    }
     const detail = cause instanceof Error ? cause.message : String(cause);
     throw new Error(`${method} ${path} could not reach ModelShelf: ${detail}`, { cause });
   }

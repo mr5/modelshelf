@@ -116,6 +116,8 @@ task can be saved. Manual IDs and revisions use the same validation.
 Downloads expose transferred bytes, current/average speed, and ETA. They can be paused, resumed, or
 cancelled. Concurrency is bounded by `MODELSHELF_MAX_CONCURRENT_DOWNLOADS` globally and
 `MODELSHELF_MAX_CONCURRENT_DOWNLOADS_PER_SOURCE` per source.
+Hub search, revision discovery and preflight fail with HTTP 504 instead of waiting indefinitely;
+change the 30-second bound with `MODELSHELF_PROVIDER_METADATA_TIMEOUT_SECONDS` if needed.
 
 Optional source-specific mirrors and the global HTTP(S) proxy are configured in `.env`. The UI
 shows when routing is active and can bypass mirror and proxy independently for one task. ModelScope

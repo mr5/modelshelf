@@ -22,6 +22,7 @@ const providers: { value: Provider; label: string; hint: string }[] = [
 ];
 
 type LookupState = "idle" | "loading" | "ready" | "error";
+const lookupTimeoutMs = 35_000;
 
 function defaultRevision(provider: Provider): string {
   if (provider === "modelscope-cn" || provider === "modelscope-ai") return "master";
@@ -39,6 +40,18 @@ function hasCompleteModelId(provider: Provider, sourceId: string): boolean {
 
 function isAbortError(cause: unknown): boolean {
   return cause instanceof DOMException && cause.name === "AbortError";
+}
+
+function lookup<T>(path: string, controller: AbortController): Promise<T> {
+  const timeout = window.setTimeout(() => {
+    controller.abort(new DOMException(
+      `Provider lookup timed out after ${lookupTimeoutMs / 1_000} seconds.`,
+      "TimeoutError",
+    ));
+  }, lookupTimeoutMs);
+  return api<T>(path, { signal: controller.signal }).finally(() => {
+    window.clearTimeout(timeout);
+  });
 }
 
 export function NewTaskPage() {
@@ -96,9 +109,9 @@ export function NewTaskPage() {
     const timer = window.setTimeout(() => {
       setModelLookup("loading");
       setModelLookupError("");
-      void api<ModelSearch>(
+      void lookup<ModelSearch>(
         `/providers/${provider}/models?q=${encodeURIComponent(query)}`,
-        { signal: controller.signal },
+        controller,
       ).then((result) => {
         setModelOptions(result.models);
         setModelLookup("ready");
@@ -135,9 +148,9 @@ export function NewTaskPage() {
     const timer = window.setTimeout(() => {
       setEstimateLookup("loading");
       setEstimateError("");
-      void api<DownloadEstimate>(
+      void lookup<DownloadEstimate>(
         `/providers/${provider}/estimate?id=${encodeURIComponent(sourceId)}&revision=${encodeURIComponent(requestedRevision)}&disableMirror=${disableMirror}&disableProxy=${disableProxy}`,
-        { signal: controller.signal },
+        controller,
       ).then((result) => {
         setEstimate(result);
         setEstimateKey(key);
@@ -170,9 +183,9 @@ export function NewTaskPage() {
     const timer = window.setTimeout(() => {
       setRevisionLookup("loading");
       setRevisionLookupError("");
-      void api<RevisionDiscovery>(
+      void lookup<RevisionDiscovery>(
         `/providers/${provider}/revisions?id=${encodeURIComponent(sourceId)}`,
-        { signal: controller.signal },
+        controller,
       ).then((result) => {
         setRevisionOptions(result.revisions);
         setRevisionLookup("ready");

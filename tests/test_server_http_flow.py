@@ -309,6 +309,49 @@ def test_provider_api_returns_the_original_sanitized_failure_reason(
     assert "[redacted]" in detail
 
 
+def test_provider_metadata_requests_have_a_bounded_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def slow_provider(*_args: object, **_kwargs: object) -> object:
+        import asyncio
+
+        await asyncio.sleep(0.1)
+        raise AssertionError("provider operation should outlive the request timeout")
+
+    monkeypatch.setattr(app_module, "search_models", slow_provider)
+    monkeypatch.setattr(app_module, "discover_revisions", slow_provider)
+    monkeypatch.setattr(app_module, "estimate_download", slow_provider)
+    settings = Settings(
+        storage_root=tmp_path / "storage",
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+        provider_metadata_timeout_seconds=0.01,
+    )
+    headers = {"Authorization": "Bearer write-token"}
+    requests = (
+        ("/api/v1/providers/modelscope-cn/models", {"q": "tiny"}, "model search"),
+        (
+            "/api/v1/providers/modelscope-cn/revisions",
+            {"id": "owner/model"},
+            "revision discovery",
+        ),
+        (
+            "/api/v1/providers/modelscope-cn/estimate",
+            {"id": "owner/model", "revision": "master"},
+            "download preflight",
+        ),
+    )
+    with TestClient(create_app(settings)) as client:
+        for path, params, operation in requests:
+            response = client.get(path, params=params, headers=headers)
+            assert response.status_code == 504
+            assert response.json()["detail"] == (
+                f"ModelScope CN {operation} failed (TimeoutError): "
+                "timed out after 0.01 seconds waiting for the provider"
+            )
+        time.sleep(0.15)
+
+
 def test_estimate_reports_an_existing_immutable_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

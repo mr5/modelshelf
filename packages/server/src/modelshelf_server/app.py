@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
@@ -136,6 +136,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tuple[Provider, str, str, bool, bool], asyncio.Task[DownloadEstimate]
     ] = {}
 
+    def track_inflight[Result, Key](
+        inflight: dict[Key, asyncio.Task[Result]],
+        key: Key,
+        task: asyncio.Task[Result],
+    ) -> None:
+        def finished(completed: asyncio.Task[Result]) -> None:
+            if inflight.get(key) is completed:
+                inflight.pop(key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+
+    async def provider_metadata[Result](
+        operation: str,
+        provider: Provider,
+        request: Awaitable[Result],
+    ) -> Result:
+        try:
+            async with asyncio.timeout(settings.provider_metadata_timeout_seconds):
+                return await request
+        except TimeoutError as error:
+            seconds = settings.provider_metadata_timeout_seconds
+            timeout = TimeoutError(
+                f"timed out after {seconds:g} seconds waiting for the provider"
+            )
+            raise HTTPException(
+                status.HTTP_504_GATEWAY_TIMEOUT,
+                provider_failure_detail(provider, operation, timeout),
+            ) from error
+
     async def cached_revisions(provider: Provider, source_id: str) -> RevisionDiscovery:
         key = (provider, source_id)
         now = time.monotonic()
@@ -154,11 +185,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             revision_inflight[key] = task
-        try:
-            result = await asyncio.shield(task)
-        finally:
-            if revision_inflight.get(key) is task:
-                revision_inflight.pop(key, None)
+            track_inflight(revision_inflight, key, task)
+        result = await asyncio.shield(task)
         if len(revision_cache) >= 256:
             oldest = min(revision_cache, key=lambda candidate: revision_cache[candidate][0])
             revision_cache.pop(oldest, None)
@@ -183,11 +211,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             model_inflight[key] = task
-        try:
-            result = await asyncio.shield(task)
-        finally:
-            if model_inflight.get(key) is task:
-                model_inflight.pop(key, None)
+            track_inflight(model_inflight, key, task)
+        result = await asyncio.shield(task)
         if len(model_cache) >= 256:
             oldest = min(model_cache, key=lambda candidate: model_cache[candidate][0])
             model_cache.pop(oldest, None)
@@ -223,11 +248,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             estimate_inflight[key] = task
-        try:
-            result = await asyncio.shield(task)
-        finally:
-            if estimate_inflight.get(key) is task:
-                estimate_inflight.pop(key, None)
+            track_inflight(estimate_inflight, key, task)
+        result = await asyncio.shield(task)
         if len(estimate_cache) >= 512:
             oldest = min(estimate_cache, key=lambda candidate: estimate_cache[candidate][0])
             estimate_cache.pop(oldest, None)
@@ -242,12 +264,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         disable_proxy: bool = False,
     ) -> DownloadEstimate:
         try:
-            return await cached_estimate(
+            return await provider_metadata(
+                "download preflight",
                 provider,
-                source_id.strip(),
-                revision.strip(),
-                disable_mirror,
-                disable_proxy,
+                cached_estimate(
+                    provider,
+                    source_id.strip(),
+                    revision.strip(),
+                    disable_mirror,
+                    disable_proxy,
+                ),
             )
         except ValueError as error:
             raise HTTPException(
@@ -264,6 +290,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status.HTTP_424_FAILED_DEPENDENCY,
                 provider_failure_detail(provider, "download preflight", error),
             ) from error
+        except HTTPException:
+            raise
         except Exception as error:
             upstream_status = getattr(error, "status_code", None) or getattr(
                 getattr(error, "response", None), "status_code", None
@@ -449,7 +477,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         source_id: Annotated[str, Query(alias="id", min_length=1, max_length=512)],
     ) -> dict[str, object]:
         try:
-            result = await cached_revisions(provider, source_id.strip())
+            result = await provider_metadata(
+                "revision discovery", provider, cached_revisions(provider, source_id.strip())
+            )
         except ValueError as error:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -465,6 +495,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status.HTTP_424_FAILED_DEPENDENCY,
                 provider_failure_detail(provider, "revision discovery", error),
             ) from error
+        except HTTPException:
+            raise
         except httpx.HTTPStatusError as error:
             upstream_status = error.response.status_code
             response_status = (
@@ -489,7 +521,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         query: Annotated[str, Query(alias="q", min_length=2, max_length=100)],
     ) -> dict[str, object]:
         try:
-            result = await cached_models(provider, query.strip())
+            result = await provider_metadata(
+                "model search", provider, cached_models(provider, query.strip())
+            )
         except ValueError as error:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -505,6 +539,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status.HTTP_424_FAILED_DEPENDENCY,
                 provider_failure_detail(provider, "model search", error),
             ) from error
+        except HTTPException:
+            raise
         except httpx.HTTPStatusError as error:
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,

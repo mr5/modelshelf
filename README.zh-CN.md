@@ -110,6 +110,8 @@ resolved immutable revision、预计大小/文件数、元信息和 source 页�
 下载任务展示已传输大小、瞬时/平均速度和 ETA，并支持暂停、恢复和取消。
 `MODELSHELF_MAX_CONCURRENT_DOWNLOADS` 控制全局并发，
 `MODELSHELF_MAX_CONCURRENT_DOWNLOADS_PER_SOURCE` 控制单个 source 的并发。
+Hub 搜索、revision 查询和 preflight 默认最多等待 30 秒，超时返回 HTTP 504；可通过
+`MODELSHELF_PROVIDER_METADATA_TIMEOUT_SECONDS` 调整。
 
 `.env` 可设置各 source 的镜像和全局 HTTP(S) 代理。UI 会提示当前路由，并允许单个任务分别
 绕过镜像或代理。ModelScope CN 和 AI 是两个独立 source，使用不同地址和 token，互相不是

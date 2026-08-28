@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     public_artifacts: bool = True
     max_concurrent_downloads: int = Field(default=2, ge=1, le=16)
     max_concurrent_downloads_per_source: int = Field(default=1, ge=1, le=16)
+    provider_metadata_timeout_seconds: float = Field(default=30, ge=0.01, le=300)
     nfs_advertised_host: str | None = None
     nfs_port: int = Field(default=2049, ge=1, le=65535)
     nfs_advertised_port: int | None = Field(default=None, ge=1, le=65535)

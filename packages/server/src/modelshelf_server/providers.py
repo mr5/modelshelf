@@ -234,6 +234,10 @@ def _modelscope_token(provider: Provider) -> str | None:
     return os.environ.get(_modelscope_token_name(provider)) or None
 
 
+def _huggingface_token() -> str | None:
+    return os.environ.get("HF_TOKEN") or None
+
+
 def _modelscope_mirror(
     provider: Provider, cn_mirror: str | None, ai_mirror: str | None
 ) -> str | None:
@@ -322,7 +326,7 @@ async def _search_huggingface_models(query: str) -> ModelSearch:
         raise _optional_import_error("Hugging Face", "huggingface-hub", error) from error
 
     def operation() -> list[object]:
-        return list(HfApi(token=os.environ.get("HF_TOKEN")).list_models(search=query, limit=30))
+        return list(HfApi(token=_huggingface_token()).list_models(search=query, limit=30))
 
     models = await asyncio.to_thread(operation)
     options = []
@@ -458,7 +462,7 @@ async def _discover_huggingface_revisions(source_id: str) -> RevisionDiscovery:
     except ImportError as error:
         raise _optional_import_error("Hugging Face", "huggingface-hub", error) from error
     refs = await asyncio.to_thread(
-        HfApi(token=os.environ.get("HF_TOKEN")).list_repo_refs,
+        HfApi(token=_huggingface_token()).list_repo_refs,
         source_id,
         repo_type="model",
     )
@@ -679,7 +683,7 @@ async def _estimate_huggingface(source_id: str, revision: str, endpoint: str) ->
     except ImportError as error:
         raise _optional_import_error("Hugging Face", "huggingface-hub", error) from error
     info = await asyncio.to_thread(
-        HfApi(endpoint=endpoint, token=os.environ.get("HF_TOKEN")).model_info,
+        HfApi(endpoint=endpoint, token=_huggingface_token()).model_info,
         source_id,
         revision=revision,
         files_metadata=True,
@@ -1192,7 +1196,7 @@ async def download_huggingface(
         from huggingface_hub import HfApi, snapshot_download
     except ImportError as error:
         raise _optional_import_error("Hugging Face", "huggingface-hub", error) from error
-    token = os.environ.get("HF_TOKEN")
+    token = _huggingface_token()
     info = await asyncio.to_thread(
         HfApi(endpoint=endpoint, token=token).model_info,
         source_id,

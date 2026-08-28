@@ -54,6 +54,16 @@ def test_modelscope_sites_use_independent_endpoints_and_tokens(
     assert provider_module._modelscope_token(Provider.MODELSCOPE_AI) == "ai-token"
 
 
+def test_empty_huggingface_token_is_treated_as_anonymous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "")
+    assert provider_module._huggingface_token() is None
+
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+    assert provider_module._huggingface_token() == "hf_test_token"
+
+
 def test_modelscope_authentication_error_names_the_selected_site_token() -> None:
     class AuthenticationError(RuntimeError):
         pass

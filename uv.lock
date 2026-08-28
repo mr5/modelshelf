@@ -659,7 +659,7 @@ wheels = [
 
 [[package]]
 name = "modelshelf-core"
-version = "0.1.0b3"
+version = "0.1.0b4"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "pydantic" },
@@ -670,7 +670,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.11,<3" }]
 
 [[package]]
 name = "modelshelf-server"
-version = "0.1.0b3"
+version = "0.1.0b4"
 source = { editable = "packages/server" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -704,7 +704,7 @@ provides-extras = ["providers"]
 
 [[package]]
 name = "modelshelf-workspace"
-version = "0.1.0b3"
+version = "0.1.0b4"
 source = { virtual = "." }
 
 [package.dev-dependencies]

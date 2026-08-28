@@ -1,8 +1,15 @@
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
-from modelshelf_core import Catalog, Provider, SourceReference, VerificationError
+from modelshelf_core import (
+    Catalog,
+    FutureSchemaVersionError,
+    Provider,
+    SourceReference,
+    VerificationError,
+)
 from modelshelf_core.catalog import verify_artifact
 from modelshelf_core.identity import (
     artifact_identity,
@@ -53,6 +60,25 @@ def test_manifest_publish_and_verify(tmp_path: Path) -> None:
     (destination / "nested/model.gguf").write_bytes(b"changed")
     assert verify_artifact(destination, full=False) == []
     assert verify_artifact(destination, full=True) == ["sha256: nested/model.gguf"]
+
+
+def test_future_manifest_and_storage_layout_versions_are_rejected(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.initialize()
+    stage = make_stage(catalog, "future")
+    catalog.create_manifest(stage, name="model", version="1", source=source())
+    manifest_path = stage / ".modelshelf" / "manifest.json"
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["schemaVersion"] = 2
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
+        catalog.read_manifest(stage)
+
+    layout = json.loads(catalog.layout_path.read_text(encoding="utf-8"))
+    layout["schemaVersion"] = 2
+    catalog.layout_path.write_text(json.dumps(layout), encoding="utf-8")
+    with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
+        Catalog(tmp_path).initialize()
 
 
 def test_artifact_paths_keep_source_names_readable_and_escape_only_unsafe_characters() -> None:
@@ -157,6 +183,19 @@ def test_corrupt_index_is_preserved_and_rebuilt_from_manifests(tmp_path: Path) -
     recovered.initialize()
 
     assert [item.artifact_id for item in recovered.list()] == [manifest.artifact_id]
+    assert list(catalog.index_path.parent.glob("catalog.sqlite3.invalid-*"))
+
+
+def test_unversioned_nonempty_index_is_preserved_and_rebuilt(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.index_path.parent.mkdir(parents=True)
+    with sqlite3.connect(catalog.index_path) as connection:
+        connection.execute("CREATE TABLE artifacts (artifact_id TEXT PRIMARY KEY)")
+    catalog.initialize()
+    with sqlite3.connect(catalog.index_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()}
+    assert "manifest_mtime_ns" in columns
     assert list(catalog.index_path.parent.glob("catalog.sqlite3.invalid-*"))
 
 

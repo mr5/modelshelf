@@ -818,6 +818,10 @@ func (application *Application) loadLock(path string, tolerateInvalid bool) (loc
 	if !tolerateInvalid || !errors.As(err, &invalid) {
 		return lockfile.File{}, false, err
 	}
+	var unsupported *lockfile.UnsupportedSchemaVersionError
+	if errors.As(err, &unsupported) && unsupported.Version > lockfile.CurrentSchemaVersion {
+		return lockfile.File{}, false, err
+	}
 	fmt.Fprintf(application.Stderr,
 		"Generated lock file %s is incompatible; the next non-frozen sync will rebuild it.\n", path)
 	return lockfile.Empty(), false, nil
@@ -841,6 +845,9 @@ func (application *Application) reconcileAndSync(
 	update bool,
 	frozen bool,
 ) error {
+	if err := config.EnsureLocalLayout(configuration); err != nil {
+		return err
+	}
 	client := api.New(configuration.ServerURL, configuration.WriteToken)
 	artifacts, err := client.Artifacts(ctx, "")
 	if err != nil {
@@ -1214,8 +1221,11 @@ func localState(
 	if readErr == nil {
 		var syncState map[string]any
 		if json.Unmarshal(data, &syncState) == nil {
-			if value, ok := syncState["syncedAt"].(string); ok {
-				synced = value
+			version, hasVersion := syncState["schemaVersion"].(float64)
+			if !hasVersion || version == 1 {
+				if value, ok := syncState["syncedAt"].(string); ok {
+					synced = value
+				}
 			}
 		}
 	}

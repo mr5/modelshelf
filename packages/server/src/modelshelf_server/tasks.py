@@ -7,9 +7,10 @@ import shutil
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from modelshelf_core import (
@@ -21,9 +22,33 @@ from modelshelf_core import (
 )
 from modelshelf_core.catalog import atomic_write_json, content_digest, inventory
 from modelshelf_core.identity import artifact_identity
+from modelshelf_core.schema import load_task_json
 
 from .archive import extract_archive, infer_metadata
 from .providers import run_provider
+
+
+@dataclass(frozen=True)
+class DuplicateIngestion:
+    kind: Literal["artifact", "task"]
+    task: DownloadTask | None = None
+    artifact_id: str | None = None
+    artifact_total_size: int | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"kind": self.kind}
+        if self.task is not None:
+            result["taskId"] = self.task.id
+            result["taskStatus"] = self.task.status.value
+        if self.artifact_id is not None:
+            result["artifactId"] = self.artifact_id
+        return result
+
+
+@dataclass(frozen=True)
+class TaskCreationResult:
+    task: DownloadTask
+    deduplication_reason: Literal["artifact", "task"] | None = None
 
 
 class TaskStore:
@@ -46,6 +71,7 @@ class TaskStore:
     ) -> DownloadTask:
         now = datetime.now(UTC)
         task = DownloadTask(
+            schema_version=1,
             id=str(uuid4()),
             provider=provider,
             source_id=source_id,
@@ -76,6 +102,7 @@ class TaskStore:
     ) -> DownloadTask:
         now = datetime.now(UTC)
         task = DownloadTask(
+            schema_version=1,
             id=str(uuid4()),
             provider=provider,
             source_id=source_id,
@@ -102,16 +129,21 @@ class TaskStore:
 
     def get(self, task_id: str) -> DownloadTask | None:
         try:
-            return DownloadTask.model_validate_json(self._path(task_id).read_text(encoding="utf-8"))
+            task, migrated = load_task_json(self._path(task_id).read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
+        if migrated:
+            self.save(task)
+        return task
 
     def list(self) -> list[DownloadTask]:
         tasks: list[DownloadTask] = []
         for path in self.jobs_root.glob("*.json"):
             try:
-                tasks.append(DownloadTask.model_validate_json(path.read_text(encoding="utf-8")))
-            except (OSError, ValueError):
+                task = self.get(path.stem)
+                if task is not None:
+                    tasks.append(task)
+            except OSError:
                 continue
         return sorted(tasks, key=lambda item: item.created_at, reverse=True)
 
@@ -270,7 +302,66 @@ class TaskManager:
             cancelled.id, timing=timing, baseline=baseline, clear_eta=True
         )
 
-    async def create(
+    def find_duplicate(
+        self,
+        provider: Provider,
+        source_id: str,
+        requested_revision: str,
+        *,
+        resolved_revision: str | None,
+        disable_mirror: bool = False,
+        disable_proxy: bool = False,
+    ) -> DuplicateIngestion | None:
+        if not resolved_revision:
+            return None
+
+        tasks = self.store.list()
+        artifact_id = artifact_identity(provider, source_id, resolved_revision)
+        existing_artifact = self.catalog.find(artifact_id)
+        if existing_artifact is not None:
+            completed = next(
+                (
+                    task
+                    for task in tasks
+                    if task.status is TaskStatus.COMPLETED and task.artifact_id == artifact_id
+                ),
+                None,
+            )
+            summary, _manifest = existing_artifact
+            return DuplicateIngestion(
+                kind="artifact",
+                task=completed,
+                artifact_id=artifact_id,
+                artifact_total_size=summary.total_size,
+            )
+
+        reusable_statuses = {
+            TaskStatus.QUEUED,
+            TaskStatus.RESOLVING,
+            TaskStatus.DOWNLOADING,
+            TaskStatus.VERIFYING,
+            TaskStatus.AWAITING_CONFIRMATION,
+            TaskStatus.PUBLISHING,
+            TaskStatus.PAUSED,
+        }
+        reusable = next(
+            (
+                task
+                for task in tasks
+                if task.status in reusable_statuses
+                and task.provider is provider
+                and task.source_id == source_id
+                and task.resolved_revision == resolved_revision
+                and task.disable_mirror == disable_mirror
+                and task.disable_proxy == disable_proxy
+            ),
+            None,
+        )
+        if reusable is None:
+            return None
+        return DuplicateIngestion(kind="task", task=reusable)
+
+    async def create_with_result(
         self,
         provider: Provider,
         source_id: str,
@@ -280,60 +371,36 @@ class TaskManager:
         total_bytes: int | None = None,
         disable_mirror: bool = False,
         disable_proxy: bool = False,
-    ) -> DownloadTask:
+    ) -> TaskCreationResult:
         async with self._create_lock:
-            if resolved_revision:
-                artifact_id = artifact_identity(provider, source_id, resolved_revision)
-                tasks = self.store.list()
-                existing_artifact = self.catalog.find(artifact_id)
-                if existing_artifact is not None:
-                    completed = next(
-                        (
-                            task
-                            for task in tasks
-                            if task.status is TaskStatus.COMPLETED
-                            and task.artifact_id == artifact_id
-                        ),
-                        None,
-                    )
-                    if completed is not None:
-                        return completed
-                    summary, _manifest = existing_artifact
-                    return self.store.create_completed(
+            duplicate = self.find_duplicate(
+                provider,
+                source_id,
+                requested_revision,
+                resolved_revision=resolved_revision,
+                disable_mirror=disable_mirror,
+                disable_proxy=disable_proxy,
+            )
+            if duplicate is not None:
+                if duplicate.task is not None:
+                    return TaskCreationResult(duplicate.task, duplicate.kind)
+                if (
+                    duplicate.kind == "artifact"
+                    and duplicate.artifact_id is not None
+                    and duplicate.artifact_total_size is not None
+                    and resolved_revision is not None
+                ):
+                    completed = self.store.create_completed(
                         provider,
                         source_id,
                         requested_revision,
                         resolved_revision,
-                        artifact_id,
-                        summary.total_size,
+                        duplicate.artifact_id,
+                        duplicate.artifact_total_size,
                         disable_mirror=disable_mirror,
                         disable_proxy=disable_proxy,
                     )
-
-                reusable_statuses = {
-                    TaskStatus.QUEUED,
-                    TaskStatus.RESOLVING,
-                    TaskStatus.DOWNLOADING,
-                    TaskStatus.VERIFYING,
-                    TaskStatus.AWAITING_CONFIRMATION,
-                    TaskStatus.PUBLISHING,
-                    TaskStatus.PAUSED,
-                }
-                reusable = next(
-                    (
-                        task
-                        for task in tasks
-                        if task.status in reusable_statuses
-                        and task.provider is provider
-                        and task.source_id == source_id
-                        and task.resolved_revision == resolved_revision
-                        and task.disable_mirror == disable_mirror
-                        and task.disable_proxy == disable_proxy
-                    ),
-                    None,
-                )
-                if reusable is not None:
-                    return reusable
+                    return TaskCreationResult(completed, "artifact")
 
             task = self.store.create(
                 provider,
@@ -346,7 +413,30 @@ class TaskManager:
             )
             await self.queue.put(task.id)
             self._scheduler_wakeup.set()
-            return task
+            return TaskCreationResult(task)
+
+    async def create(
+        self,
+        provider: Provider,
+        source_id: str,
+        requested_revision: str,
+        *,
+        resolved_revision: str | None = None,
+        total_bytes: int | None = None,
+        disable_mirror: bool = False,
+        disable_proxy: bool = False,
+    ) -> DownloadTask:
+        return (
+            await self.create_with_result(
+                provider,
+                source_id,
+                requested_revision,
+                resolved_revision=resolved_revision,
+                total_bytes=total_bytes,
+                disable_mirror=disable_mirror,
+                disable_proxy=disable_proxy,
+            )
+        ).task
 
     async def _update(self, task_id: str, **values: Any) -> DownloadTask:
         async with self._update_lock:

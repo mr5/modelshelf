@@ -86,8 +86,7 @@
   "additionalProperties": false,
   "properties": {
     "schemaVersion": {
-      "default": 1,
-      "minimum": 1,
+      "const": 1,
       "title": "Schemaversion",
       "type": "integer"
     },
@@ -150,6 +149,7 @@
     }
   },
   "required": [
+    "schemaVersion",
     "artifactId",
     "name",
     "version",

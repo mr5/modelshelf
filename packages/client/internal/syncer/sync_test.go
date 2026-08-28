@@ -264,13 +264,13 @@ func assertSyncedContent(t *testing.T, destination, content, artifactID string) 
 	}
 }
 
-func readSyncState(t *testing.T, destination string) map[string]string {
+func readSyncState(t *testing.T, destination string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(destination, ".modelshelf", "sync.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result map[string]string
+	var result map[string]any
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatal(err)
 	}

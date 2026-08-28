@@ -10,7 +10,7 @@ from pathlib import Path
 from .identity import artifact_relative_path
 from .models import ArtifactSummary, Provider
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 
 
 class CatalogIndexVersionError(RuntimeError):
@@ -48,6 +48,17 @@ class CatalogIndex:
     def _initialize_schema(self) -> None:
         with closing(self._connect()) as connection, connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            user_tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                )
+            }
+            if version == 0 and user_tables:
+                raise CatalogIndexVersionError(
+                    "unversioned non-empty catalog index cannot be trusted"
+                )
             if version not in {0, SCHEMA_VERSION}:
                 raise CatalogIndexVersionError(
                     f"unsupported catalog index schema version {version}"
@@ -84,8 +95,7 @@ class CatalogIndex:
                 "ON artifacts(provider, created_at DESC, artifact_id)"
             )
             connection.execute(
-                "CREATE INDEX IF NOT EXISTS artifacts_size "
-                "ON artifacts(total_size, artifact_id)"
+                "CREATE INDEX IF NOT EXISTS artifacts_size ON artifacts(total_size, artifact_id)"
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS artifacts_name "

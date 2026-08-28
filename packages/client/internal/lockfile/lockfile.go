@@ -29,7 +29,28 @@ type Model struct {
 }
 
 type File struct {
-	Models []Model `yaml:"models"`
+	SchemaVersion  int     `yaml:"schemaVersion"`
+	Models         []Model `yaml:"models"`
+	needsMigration bool
+}
+
+const CurrentSchemaVersion = 1
+
+type UnsupportedSchemaVersionError struct {
+	Version int
+}
+
+func (unsupported *UnsupportedSchemaVersionError) Error() string {
+	if unsupported.Version > CurrentSchemaVersion {
+		return fmt.Sprintf(
+			"lock schemaVersion %d is newer than supported version %d; upgrade ModelShelf",
+			unsupported.Version, CurrentSchemaVersion,
+		)
+	}
+	return fmt.Sprintf(
+		"unsupported lock schemaVersion %d (supported: %d); upgrade ModelShelf",
+		unsupported.Version, CurrentSchemaVersion,
+	)
 }
 
 type InvalidError struct {
@@ -43,7 +64,7 @@ func (invalid *InvalidError) Error() string {
 
 func (invalid *InvalidError) Unwrap() error { return invalid.Err }
 
-func Empty() File { return File{Models: []Model{}} }
+func Empty() File { return File{SchemaVersion: CurrentSchemaVersion, Models: []Model{}} }
 
 func Path(configPath string) string {
 	extension := filepath.Ext(configPath)
@@ -70,6 +91,11 @@ func Load(path string) (File, bool, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return File{}, false, &InvalidError{Path: path, Err: errors.New("trailing YAML document")}
 	}
+	if result.SchemaVersion == 0 {
+		// Pre-release generated lock files had the v1 shape without a marker.
+		result.SchemaVersion = CurrentSchemaVersion
+		result.needsMigration = true
+	}
 	if err := Validate(result); err != nil {
 		return File{}, false, &InvalidError{Path: path, Err: err}
 	}
@@ -77,6 +103,12 @@ func Load(path string) (File, bool, error) {
 }
 
 func Validate(file File) error {
+	if file.SchemaVersion == 0 {
+		file.SchemaVersion = CurrentSchemaVersion
+	}
+	if file.SchemaVersion != CurrentSchemaVersion {
+		return &UnsupportedSchemaVersionError{Version: file.SchemaVersion}
+	}
 	seen := map[string]struct{}{}
 	seenAliases := map[string]struct{}{}
 	for index, model := range file.Models {
@@ -101,6 +133,8 @@ func Validate(file File) error {
 }
 
 func Save(file File, path string) error {
+	file.SchemaVersion = CurrentSchemaVersion
+	file.needsMigration = false
 	Sort(&file)
 	if err := Validate(file); err != nil {
 		return err

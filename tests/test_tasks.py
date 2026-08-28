@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from pathlib import Path
 
 import modelshelf_server.tasks as task_module
 import pytest
-from modelshelf_core import Catalog, Provider, SourceReference
+from modelshelf_core import Catalog, FutureSchemaVersionError, Provider, SourceReference
 from modelshelf_server.providers import Progress, ProviderResult
 from modelshelf_server.tasks import TaskManager
 
@@ -39,6 +40,32 @@ def test_create_reuses_task_with_the_same_immutable_identity(tmp_path: Path) -> 
     asyncio.run(exercise())
 
 
+def test_pre_release_task_file_is_atomically_upgraded_to_schema_v1(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def create() -> str:
+        task = await manager.create(Provider.HTTP, "https://example.test/model", "content")
+        return task.id
+
+    task_id = asyncio.run(create())
+    task_path = catalog.jobs_root / f"{task_id}.json"
+    document = json.loads(task_path.read_text(encoding="utf-8"))
+    document.pop("schemaVersion")
+    task_path.write_text(json.dumps(document), encoding="utf-8")
+
+    loaded = manager.store.get(task_id)
+    assert loaded is not None
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 1
+
+    document = json.loads(task_path.read_text(encoding="utf-8"))
+    document["schemaVersion"] = 2
+    task_path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
+        manager.store.list()
+
+
 def test_create_reuses_existing_artifact_without_downloading(tmp_path: Path) -> None:
     catalog = Catalog(tmp_path / "storage")
     catalog.initialize()
@@ -61,12 +88,24 @@ def test_create_reuses_existing_artifact_without_downloading(tmp_path: Path) -> 
     manager = TaskManager(catalog, github_token=None)
 
     async def exercise() -> None:
-        first = await manager.create(
+        before_create = manager.find_duplicate(
             Provider.HUGGINGFACE,
             "owner/model",
             "main",
             resolved_revision=resolved,
         )
+        assert before_create is not None
+        assert before_create.kind == "artifact"
+        assert before_create.artifact_id == manifest.artifact_id
+        assert before_create.task is None
+
+        first_result = await manager.create_with_result(
+            Provider.HUGGINGFACE,
+            "owner/model",
+            "main",
+            resolved_revision=resolved,
+        )
+        first = first_result.task
         second = await manager.create(
             Provider.HUGGINGFACE,
             "owner/model",
@@ -76,6 +115,7 @@ def test_create_reuses_existing_artifact_without_downloading(tmp_path: Path) -> 
         assert first.status.value == "completed"
         assert first.artifact_id == manifest.artifact_id
         assert first.bytes_downloaded == manifest.total_size
+        assert first_result.deduplication_reason == "artifact"
         assert second.id == first.id
         assert manager.queue.empty()
 

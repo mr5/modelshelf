@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,11 +17,21 @@ import (
 )
 
 type Config struct {
+	SchemaVersion int                   `yaml:"schemaVersion"`
 	ServerURL     string                `yaml:"serverUrl"`
 	NFSLocalPath  string                `yaml:"nfsLocalPath"`
 	LocalBasePath string                `yaml:"localBasePath"`
 	WriteToken    string                `yaml:"writeToken,omitempty"`
 	Models        []domain.DesiredModel `yaml:"models,omitempty"`
+}
+
+const CurrentSchemaVersion = 1
+
+const CurrentLocalLayoutSchemaVersion = 1
+
+type localLayout struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	Kind          string `json:"kind"`
 }
 
 func Defaults() (Config, error) {
@@ -29,6 +40,7 @@ func Defaults() (Config, error) {
 		return Config{}, fmt.Errorf("resolve home directory: %w", err)
 	}
 	return Config{
+		SchemaVersion: CurrentSchemaVersion,
 		ServerURL:     "http://localhost:8080",
 		NFSLocalPath:  "/mnt/modelshelf",
 		LocalBasePath: filepath.Join(home, ".local", "share", "modelshelf"),
@@ -87,10 +99,23 @@ func Load(path string) (Config, string, error) {
 	if err := defaults.Validate(); err != nil {
 		return Config{}, "", fmt.Errorf("invalid config %s: %w", path, err)
 	}
+	if err := CheckLocalLayout(defaults); err != nil {
+		return Config{}, "", err
+	}
 	return defaults, path, nil
 }
 
 func (config *Config) Validate() error {
+	if config.SchemaVersion == 0 {
+		// Pre-release configuration files did not include an explicit version.
+		config.SchemaVersion = CurrentSchemaVersion
+	}
+	if config.SchemaVersion != CurrentSchemaVersion {
+		return fmt.Errorf(
+			"unsupported config schemaVersion %d (supported: %d); upgrade ModelShelf",
+			config.SchemaVersion, CurrentSchemaVersion,
+		)
+	}
 	if config.ServerURL == "" {
 		return errors.New("serverUrl is required")
 	}
@@ -257,6 +282,9 @@ func ReferencePaths(config Config, model domain.DesiredModel) ([]string, error) 
 		if pathWithin(candidate, filepath.Join(config.LocalBasePath, ".staging")) {
 			return nil, errors.New("model path cannot use the reserved .staging directory")
 		}
+		if pathWithin(candidate, filepath.Join(config.LocalBasePath, ".modelshelf")) {
+			return nil, errors.New("model path cannot use the reserved .modelshelf directory")
+		}
 		if pathWithin(candidate, filepath.Join(config.LocalBasePath, "aliases")) {
 			return nil, errors.New("model path cannot point inside the reserved aliases directory")
 		}
@@ -353,4 +381,86 @@ func pathWithin(candidate, root string) bool {
 
 func ModelKey(provider, id string) string {
 	return provider + ":" + id
+}
+
+func localLayoutPath(config Config) string {
+	return filepath.Join(config.LocalBasePath, ".modelshelf", "layout.json")
+}
+
+func CheckLocalLayout(config Config) error {
+	path := localLayoutPath(config)
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read local layout marker %s: %w", path, err)
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(io.LimitReader(file, 1024*1024))
+	decoder.DisallowUnknownFields()
+	var layout localLayout
+	if err := decoder.Decode(&layout); err != nil {
+		return fmt.Errorf("invalid local layout marker %s: %w", path, err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return fmt.Errorf("invalid local layout marker %s: trailing data", path)
+	}
+	if layout.SchemaVersion != CurrentLocalLayoutSchemaVersion ||
+		layout.Kind != "modelshelf-client-layout" {
+		return fmt.Errorf(
+			"unsupported local layout schemaVersion %d (supported: %d); upgrade ModelShelf",
+			layout.SchemaVersion, CurrentLocalLayoutSchemaVersion,
+		)
+	}
+	return nil
+}
+
+func EnsureLocalLayout(config Config) error {
+	if err := CheckLocalLayout(config); err != nil {
+		return err
+	}
+	path := localLayoutPath(config)
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create local layout directory: %w", err)
+	}
+	data, err := json.MarshalIndent(localLayout{
+		SchemaVersion: CurrentLocalLayoutSchemaVersion,
+		Kind:          "modelshelf-client-layout",
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	temporary, err := os.CreateTemp(parent, ".layout.json.*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("publish local layout marker: %w", err)
+	}
+	return syncDirectory(parent)
 }

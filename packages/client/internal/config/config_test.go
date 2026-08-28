@@ -59,6 +59,48 @@ models:
 	if reloaded.Models[0].Alias != "mini-lm" {
 		t.Fatalf("alias did not round trip: %#v", reloaded.Models[0])
 	}
+	if reloaded.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("schema version = %d", reloaded.SchemaVersion)
+	}
+}
+
+func TestLoadRejectsFutureConfigAndLocalLayoutSchemas(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yml")
+	input := `schemaVersion: 2
+serverUrl: http://modelshelf.test:8080
+nfsLocalPath: /mnt/modelshelf
+localBasePath: ` + filepath.Join(root, "local") + `
+`
+	if err := os.WriteFile(configPath, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(configPath); err == nil {
+		t.Fatal("future config schema was accepted")
+	}
+
+	input = `schemaVersion: 1
+serverUrl: http://modelshelf.test:8080
+nfsLocalPath: /mnt/modelshelf
+localBasePath: ` + filepath.Join(root, "local") + `
+`
+	if err := os.WriteFile(configPath, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration, _, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureLocalLayout(configuration); err != nil {
+		t.Fatal(err)
+	}
+	layoutPath := filepath.Join(configuration.LocalBasePath, ".modelshelf", "layout.json")
+	if err := os.WriteFile(layoutPath, []byte(`{"schemaVersion":2,"kind":"modelshelf-client-layout"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(configPath); err == nil {
+		t.Fatal("future local layout schema was accepted")
+	}
 }
 
 func TestValidateRejectsInvalidProvider(t *testing.T) {

@@ -415,12 +415,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def artifacts(
         q: Annotated[str | None, Query(max_length=200)] = None,
         provider: Provider | None = None,
-        sort_by: Annotated[
-            Literal["created", "name", "size"], Query(alias="sortBy")
-        ] = "created",
-        sort_order: Annotated[
-            Literal["asc", "desc"], Query(alias="sortOrder")
-        ] = "desc",
+        sort_by: Annotated[Literal["created", "name", "size"], Query(alias="sortBy")] = "created",
+        sort_order: Annotated[Literal["asc", "desc"], Query(alias="sortOrder")] = "desc",
         limit: Annotated[int | None, Query(ge=1, le=500)] = None,
         offset: Annotated[int, Query(ge=0)] = 0,
     ) -> list[dict[str, Any]]:
@@ -513,7 +509,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         result = await validated_estimate(
             provider, source_id, revision, disable_mirror, disable_proxy
         )
-        return result.as_dict()
+        response = result.as_dict()
+        duplicate = manager.find_duplicate(
+            result.provider,
+            result.source_id,
+            result.requested_revision,
+            resolved_revision=result.resolved_revision,
+            disable_mirror=disable_mirror,
+            disable_proxy=disable_proxy,
+        )
+        if duplicate is not None:
+            response["duplicate"] = duplicate.as_dict()
+        return response
 
     @app.get("/api/v1/tasks", dependencies=[Depends(require_write)])
     async def tasks() -> list[dict[str, Any]]:
@@ -570,7 +577,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.disable_mirror,
             body.disable_proxy,
         )
-        item = await manager.create(
+        creation = await manager.create_with_result(
             estimate.provider,
             estimate.source_id,
             estimate.requested_revision,
@@ -579,7 +586,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             disable_mirror=body.disable_mirror,
             disable_proxy=body.disable_proxy,
         )
+        item = creation.task
         result = item.model_dump(mode="json", by_alias=True, exclude_none=True)
+        result["deduplicated"] = creation.deduplication_reason is not None
+        if creation.deduplication_reason is not None:
+            result["deduplicationReason"] = creation.deduplication_reason
         if body.provider is Provider.HTTP:
             result["warning"] = (
                 "Generic HTTP content remains in staging and requires explicit metadata/extraction "
@@ -616,6 +627,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             candidate = (ui_dist / path).resolve()
             if candidate.is_file() and candidate.is_relative_to(ui_dist.resolve()):
                 return FileResponse(candidate)
-            return FileResponse(ui_dist / "index.html")
+            return FileResponse(
+                ui_dist / "index.html",
+                headers={"Cache-Control": "no-cache"},
+            )
 
     return app

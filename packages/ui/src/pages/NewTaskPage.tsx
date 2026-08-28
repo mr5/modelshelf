@@ -212,6 +212,7 @@ export function NewTaskPage() {
   const estimateIsCurrent = estimateLookup === "ready"
     && estimateKey === currentEstimateKey
     && estimate?.downloadable === true;
+  const duplicate = estimateIsCurrent ? estimate?.duplicate : undefined;
   return <div className="page narrow">
     <Link className="back" to="/tasks">← Downloads</Link>
     <div className="page-head"><div><p className="eyebrow">New ingestion</p><h1>Download a model</h1></div></div>
@@ -301,6 +302,13 @@ export function NewTaskPage() {
         {estimateLookup === "loading" && <div><strong>Checking download…</strong><span>Validating access, revision and file metadata with the selected provider.</span></div>}
         {estimateLookup === "error" && <div><strong>Cannot validate this download</strong><span>{estimateError}. Check the ID, revision and provider credentials before submitting.</span></div>}
         {estimateLookup === "ready" && estimate && estimateKey === currentEstimateKey && <>
+          {duplicate && <div className="duplicate-notice" role="status">
+            <strong>{duplicate.kind === "artifact" ? "Already on this shelf" : "Download task already exists"}</strong>
+            <span>{duplicate.kind === "artifact"
+              ? "This exact immutable revision is already stored. Starting another download would not create a second artifact."
+              : `This exact immutable revision already has a ${duplicate.taskStatus?.replaceAll("_", " ") ?? "running"} task. A duplicate submission would reuse it.`}</span>
+            {duplicate.taskId && <Link to={`/tasks/${duplicate.taskId}`}>Open existing task →</Link>}
+          </div>}
           <div className="estimate-summary">
             <div><span>Estimated download</span><strong>{estimate.totalSize === undefined ? "Size unavailable" : formatDownloadSize(estimate.totalSize)}</strong></div>
             <div><span>Files</span><strong>{estimate.fileCount === undefined ? "Unknown" : estimate.fileCount.toLocaleString()}</strong></div>
@@ -316,7 +324,14 @@ export function NewTaskPage() {
       </section>
       {provider === "http" && <div className="warning"><strong>Two-stage download</strong><span>The URL will only be downloaded into staging. After it finishes, you must review inferred metadata and explicitly choose whether to extract it before anything is published.</span></div>}
       {error && <div className="error-box">{error}</div>}
-      <div className="actions"><Link className="ghost button" to="/tasks">Cancel</Link><button disabled={busy || !estimateIsCurrent}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : "Start download"}</button></div>
+      <div className="actions">
+        <Link className="ghost button" to="/tasks">Cancel</Link>
+        {duplicate?.taskId
+          ? <Link className="button existing-action" to={`/tasks/${duplicate.taskId}`}>Open existing task</Link>
+          : duplicate?.kind === "artifact"
+            ? <Link className="button existing-action" to="/artifacts">View artifact</Link>
+            : <button disabled={busy || !estimateIsCurrent}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : "Start download"}</button>}
+      </div>
     </form>
   </div>;
 }

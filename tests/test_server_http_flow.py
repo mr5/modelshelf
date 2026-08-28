@@ -10,7 +10,7 @@ import modelshelf_server.app as app_module
 import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
-from modelshelf_core import Provider
+from modelshelf_core import Catalog, Provider, SourceReference
 from modelshelf_server.app import create_app
 from modelshelf_server.config import Settings
 from modelshelf_server.providers import (
@@ -160,12 +160,10 @@ def test_generic_http_requires_confirmation_before_publish(tmp_path: Path) -> No
                     "sortOrder": "asc",
                 },
             ).json() == [artifact_result]
-            assert client.get(
-                "/api/v1/artifacts", params={"provider": "huggingface"}
-            ).json() == []
-            assert client.get(
-                "/api/v1/artifacts", params={"sortBy": "unsupported"}
-            ).status_code == 422
+            assert client.get("/api/v1/artifacts", params={"provider": "huggingface"}).json() == []
+            assert (
+                client.get("/api/v1/artifacts", params={"sortBy": "unsupported"}).status_code == 422
+            )
             assert client.get("/api/v1/artifacts", params={"limit": 1, "offset": 1}).json() == []
             detail = client.get(f"/api/v1/artifacts/{artifact_result['artifactId']}").json()
             manifest = detail["manifest"]
@@ -273,6 +271,74 @@ def test_provider_search_and_revision_discovery_are_authenticated_and_cached(
             assert estimate.json()["hubUrl"] == "https://hub.example/owner/model"
             assert estimate.json()["metadata"] == [{"label": "Library", "value": "transformers"}]
     assert calls == {"models": 1, "revisions": 1, "estimates": 1}
+
+
+def test_estimate_reports_an_existing_immutable_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = "b" * 40
+    storage_root = tmp_path / "storage"
+    catalog = Catalog(storage_root)
+    catalog.initialize()
+    stage = catalog.staging_path("seed") / "artifact"
+    stage.mkdir(parents=True)
+    (stage / "model.bin").write_bytes(b"weights")
+    manifest = catalog.create_manifest(
+        stage,
+        name="model",
+        version=resolved,
+        source=SourceReference(
+            provider=Provider.HUGGINGFACE,
+            id="owner/model",
+            requested_revision="main",
+            resolved_revision=resolved,
+        ),
+    )
+    catalog.publish(stage, manifest)
+
+    async def fake_estimate(
+        provider: Provider,
+        source_id: str,
+        revision: str,
+        **_network: object,
+    ) -> DownloadEstimate:
+        return DownloadEstimate(provider, source_id, revision, resolved, 7, 1)
+
+    monkeypatch.setattr(app_module, "estimate_download", fake_estimate)
+    settings = Settings(
+        storage_root=storage_root,
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    headers = {"Authorization": "Bearer write-token"}
+    with TestClient(create_app(settings)) as client:
+        estimate = client.get(
+            "/api/v1/providers/huggingface/estimate",
+            params={"id": "owner/model", "revision": "main"},
+            headers=headers,
+        )
+        assert estimate.status_code == 200
+        assert estimate.json()["duplicate"] == {
+            "kind": "artifact",
+            "artifactId": manifest.artifact_id,
+        }
+
+        created = client.post(
+            "/api/v1/tasks",
+            json={"provider": "huggingface", "id": "owner/model", "revision": "main"},
+            headers=headers,
+        )
+        assert created.status_code == 202
+        assert created.json()["status"] == "completed"
+        assert created.json()["deduplicated"] is True
+        assert created.json()["deduplicationReason"] == "artifact"
+
+        repeated_estimate = client.get(
+            "/api/v1/providers/huggingface/estimate",
+            params={"id": "owner/model", "revision": "main"},
+            headers=headers,
+        )
+        assert repeated_estimate.json()["duplicate"]["taskId"] == created.json()["id"]
 
 
 def test_task_creation_rejects_a_failed_download_preflight(

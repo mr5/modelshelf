@@ -21,6 +21,7 @@ import (
 )
 
 const ManifestPath = ".modelshelf/manifest.json"
+const CurrentManifestSchemaVersion = 1
 
 type VerifyOptions struct {
 	Full       bool
@@ -57,8 +58,17 @@ func ReadManifest(root string) (domain.ArtifactManifest, error) {
 }
 
 func ValidateManifest(manifest domain.ArtifactManifest) error {
-	if manifest.SchemaVersion < 1 {
-		return errors.New("manifest schemaVersion must be at least 1")
+	if manifest.SchemaVersion != CurrentManifestSchemaVersion {
+		if manifest.SchemaVersion > CurrentManifestSchemaVersion {
+			return fmt.Errorf(
+				"manifest schemaVersion %d is newer than supported version %d; upgrade ModelShelf",
+				manifest.SchemaVersion, CurrentManifestSchemaVersion,
+			)
+		}
+		return fmt.Errorf(
+			"unsupported manifest schemaVersion %d (supported: %d)",
+			manifest.SchemaVersion, CurrentManifestSchemaVersion,
+		)
 	}
 	if manifest.ArtifactID == "" || manifest.Name == "" || manifest.Version == "" {
 		return errors.New("manifest artifactId, name, and version are required")

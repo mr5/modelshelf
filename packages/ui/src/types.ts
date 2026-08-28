@@ -42,6 +42,12 @@ export interface DownloadEstimate {
   fileCount?: number;
   hubUrl?: string;
   metadata: EstimateMetadata[];
+  duplicate?: {
+    kind: "artifact" | "task";
+    taskId?: string;
+    taskStatus?: TaskStatus;
+    artifactId?: string;
+  };
 }
 
 export interface ServerInfo {
@@ -114,6 +120,8 @@ export interface DownloadTask {
   error?: string;
   artifactId?: string;
   inferredMetadata?: InferredMetadata;
+  deduplicated?: boolean;
+  deduplicationReason?: "artifact" | "task";
 }
 
 export interface ArtifactSummary {

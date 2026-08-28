@@ -54,6 +54,10 @@ resolutions in a generated lock file next to the config (`config.yml` → `confi
 rewriting user configuration. Use `sync --update` to refresh branches/tags, or
 `sync --frozen-lockfile` to require an exact existing lock.
 
+Both files use `schemaVersion: 1`. The user-owned config is never silently rewritten merely because
+it was read. The generated lock is migrated atomically when possible; an older CLI refuses a lock
+written by a newer schema instead of silently resolving moving revisions again.
+
 Generate a server-compatible Argon2id web password hash locally with:
 
 ```bash

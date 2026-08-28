@@ -1,6 +1,7 @@
 package lockfile
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -36,6 +37,23 @@ func TestRoundTripAndFind(t *testing.T) {
 	})
 	if entry == nil || entry.ResolvedRevision != "abc" {
 		t.Fatalf("entry = %#v", entry)
+	}
+}
+
+func TestMissingVersionIsMigratedAndFutureVersionIsRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.lock.yml")
+	if err := os.WriteFile(path, []byte("models: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := Load(path)
+	if err != nil || loaded.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("legacy lock = %#v err=%v", loaded, err)
+	}
+	if err := os.WriteFile(path, []byte("schemaVersion: 2\nmodels: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(path); err == nil {
+		t.Fatal("future lock schema was accepted")
 	}
 }
 

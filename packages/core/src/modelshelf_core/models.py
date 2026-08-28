@@ -3,8 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+MANIFEST_SCHEMA_VERSION = 1
+TASK_SCHEMA_VERSION = 1
+STORAGE_LAYOUT_SCHEMA_VERSION = 1
 
 
 def to_camel(value: str) -> str:
@@ -62,7 +67,7 @@ class SourceReference(Model):
 
 
 class ArtifactManifest(Model):
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: Literal[1]
     artifact_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     version: str = Field(min_length=1)
@@ -73,6 +78,11 @@ class ArtifactManifest(Model):
     total_size: int = Field(ge=0)
     file_count: int = Field(ge=0)
     files: list[FileEntry]
+
+
+class StorageLayout(Model):
+    schema_version: Literal[1]
+    kind: Literal["modelshelf-storage"] = "modelshelf-storage"
 
 
 class ArtifactSummary(Model):
@@ -99,6 +109,7 @@ class InferredMetadata(Model):
 
 
 class DownloadTask(Model):
+    schema_version: Literal[1]
     id: str
     provider: Provider
     source_id: str

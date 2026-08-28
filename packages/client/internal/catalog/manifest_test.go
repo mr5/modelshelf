@@ -71,6 +71,14 @@ func TestValidateManifestRejectsUnsafeAndDuplicatePaths(t *testing.T) {
 	}
 }
 
+func TestValidateManifestRejectsFutureSchemaVersion(t *testing.T) {
+	manifest := validManifest([]domain.FileEntry{})
+	manifest.SchemaVersion = CurrentManifestSchemaVersion + 1
+	if err := ValidateManifest(manifest); err == nil || !strings.Contains(err.Error(), "upgrade ModelShelf") {
+		t.Fatalf("future manifest result: %v", err)
+	}
+}
+
 func TestVerifyRejectsExpectedSymlink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")

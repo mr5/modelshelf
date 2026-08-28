@@ -98,6 +98,12 @@ input:focus, select:focus { border-color:var(--green); box-shadow:0 0 0 3px rgba
 .route-detail { display:grid; gap:3px; min-width:0; }
 .route-detail code { display:block; min-width:0; width:100%; color:#554d2e; font-size:12px; white-space:normal; overflow-wrap:anywhere; word-break:break-word; }
 .warning { background:var(--cream); border:1px solid #e6dcae; border-radius:10px; padding:15px; display:grid; gap:5px; color:#5f542b; font-size:13px; line-height:1.5; }
+.duplicate-notice { background:#fff8e5; border:1px solid #e4cf8c; border-radius:10px; padding:15px; display:grid; gap:5px; color:#69551b; font-size:13px; line-height:1.5; }
+.duplicate-notice strong { color:#624b08; font-size:14px; }
+.estimate-card .duplicate-notice span { color:#69551b; }
+.duplicate-notice a { width:max-content; color:#624b08; font-weight:750; text-decoration:underline; text-underline-offset:3px; }
+.button.existing-action { background:white; color:#594b20; border:1px solid #d9c681; }
+.button.existing-action:hover { background:#fbf4dc; color:#493c15; }
 .actions { display:flex; justify-content:flex-end; gap:10px; }
 .load-more { display:flex; justify-content:center; padding:22px 0 4px; }
 .integration-page { scroll-behavior:smooth; }

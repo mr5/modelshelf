@@ -21,6 +21,8 @@ Go modelshelf CLI ──┼─ HTTP API ─ rebuildable SQLite summary index
 Every artifact contains `.modelshelf/manifest.json` with provider/source, requested and resolved
 revision, path, size and SHA-256 for every file, total size, file count and a content digest.
 The generated JSON Schema is available at `schemas/manifest.schema.json`.
+Persistent-format compatibility and upgrade rules are documented in
+[`docs/schema-migrations.md`](docs/schema-migrations.md).
 
 ## Quick start with Docker Compose
 
@@ -173,6 +175,7 @@ The default config path is `~/.config/modelshelf/config.yml`; override it with
 `MODELSHELF_CONFIG`. The default `localBasePath` is `~/.local/share/modelshelf`.
 
 ```yaml
+schemaVersion: 1
 serverUrl: http://modelshelf.internal:8080
 nfsLocalPath: /mnt/modelshelf
 localBasePath: /var/lib/modelshelf
@@ -199,6 +202,7 @@ Local content and references are deliberately separate:
 
 ```text
 /var/lib/modelshelf/
+├── .modelshelf/layout.json             # local directory-layout version
 ├── models/<source>/<vendor>/<model>/
 │   ├── <resolved-revision>/            # one canonical immutable copy
 │   └── <requested-revision> -> <resolved-revision>/
@@ -314,6 +318,7 @@ deduplication status.
 
 ```text
 data/
+  .modelshelf/storage.json    # server storage-layout version
   .modelshelf/catalog.sqlite3 # disposable, rebuildable summary index
   .modelshelf/jobs/<task-id>.json
   .incoming/<operator-copied-model>/...

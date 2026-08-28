@@ -134,10 +134,11 @@ func SyncArtifact(
 	if err := os.Chmod(metadataDirectory, 0o755); err != nil {
 		return domain.ArtifactSummary{}, fmt.Errorf("make metadata directory writable: %w", err)
 	}
-	syncState := map[string]string{
-		"artifactId": artifact.ArtifactID,
-		"serverUrl":  configuration.ServerURL,
-		"syncedAt":   time.Now().UTC().Format(time.RFC3339Nano),
+	syncState := map[string]any{
+		"schemaVersion": 1,
+		"artifactId":    artifact.ArtifactID,
+		"serverUrl":     configuration.ServerURL,
+		"syncedAt":      time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if err := writeAtomicJSON(filepath.Join(metadataDirectory, "sync.json"), syncState); err != nil {
 		return domain.ArtifactSummary{}, err

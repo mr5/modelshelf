@@ -24,7 +24,9 @@ from .models import (
     FileEntry,
     Provider,
     SourceReference,
+    StorageLayout,
 )
+from .schema import FutureSchemaVersionError, load_manifest_json, load_storage_layout_json
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +121,7 @@ class Catalog:
         self.staging_root = self.storage_root / ".staging"
         self.incoming_root = self.storage_root / ".incoming"
         self.jobs_root = self.storage_root / ".modelshelf" / "jobs"
+        self.layout_path = self.storage_root / ".modelshelf" / "storage.json"
         self.index_path = index_path or self.storage_root / ".modelshelf" / "catalog.sqlite3"
         self.index = CatalogIndex(self.index_path)
 
@@ -131,6 +134,14 @@ class Catalog:
             self.index_path.parent,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+        if self.layout_path.exists():
+            load_storage_layout_json(self.layout_path.read_text(encoding="utf-8"))
+        else:
+            layout = StorageLayout(schema_version=1)
+            atomic_write_json(
+                self.layout_path,
+                layout.model_dump(mode="json", by_alias=True),
+            )
         self.index.initialize()
         self.reconcile_index()
 
@@ -153,6 +164,7 @@ class Catalog:
         files = inventory(root) if files is None else files
         digest = content_digest(files)
         manifest = ArtifactManifest(
+            schema_version=1,
             artifact_id=artifact_identity(source.provider, source.id, source.resolved_revision),
             name=name,
             version=version,
@@ -204,7 +216,7 @@ class Catalog:
     @staticmethod
     def read_manifest(artifact_root: Path) -> ArtifactManifest:
         raw = (artifact_root / ".modelshelf" / "manifest.json").read_text(encoding="utf-8")
-        return ArtifactManifest.model_validate_json(raw)
+        return load_manifest_json(raw)
 
     def _summary(self, artifact_root: Path, manifest: ArtifactManifest) -> ArtifactSummary:
         relative_path = artifact_relative_path(
@@ -261,6 +273,8 @@ class Catalog:
                 summary = self._summary(artifact_root, manifest)
                 changed.append((summary, stat.st_mtime_ns, stat.st_size))
                 valid_artifact_ids.append(summary.artifact_id)
+            except FutureSchemaVersionError:
+                raise
             except (OSError, ValueError, VerificationError):
                 continue
         self.index.reconcile(changed, valid_artifact_ids)
@@ -308,6 +322,8 @@ class Catalog:
         artifact_root = self.artifacts_root / summary.relative_path
         try:
             return summary, self.read_manifest(artifact_root)
+        except FutureSchemaVersionError:
+            raise
         except (OSError, ValueError):
             return None
 

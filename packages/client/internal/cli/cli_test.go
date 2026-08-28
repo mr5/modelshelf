@@ -275,17 +275,26 @@ models:
 	if err := os.WriteFile(configPath, []byte(configuration), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	legacyLock := `schemaVersion: 1
+	futureLock := `schemaVersion: 2
 models: []
 `
-	if err := os.WriteFile(lockfile.Path(configPath), []byte(legacyLock), 0o600); err != nil {
+	if err := os.WriteFile(lockfile.Path(configPath), []byte(futureLock), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
 	frozenCommand := NewWithIO("test", "commit", strings.NewReader(""), &output, &output)
 	frozenCommand.SetArgs([]string{"--config", configPath, "sync", "--frozen-lockfile"})
-	if err := frozenCommand.Execute(); err == nil || !strings.Contains(err.Error(), "invalid generated lock file") {
-		t.Fatalf("frozen legacy lock err=%v output=%s", err, output.String())
+	if err := frozenCommand.Execute(); err == nil || !strings.Contains(err.Error(), "newer than supported") {
+		t.Fatalf("frozen future lock err=%v output=%s", err, output.String())
+	}
+	output.Reset()
+	guardedCommand := NewWithIO("test", "commit", strings.NewReader(""), &output, &output)
+	guardedCommand.SetArgs([]string{"--config", configPath, "sync", "prod"})
+	if err := guardedCommand.Execute(); err == nil || !strings.Contains(err.Error(), "newer than supported") {
+		t.Fatalf("future lock was silently rebuilt err=%v output=%s", err, output.String())
+	}
+	if err := os.Remove(lockfile.Path(configPath)); err != nil {
+		t.Fatal(err)
 	}
 	output.Reset()
 	command := NewWithIO("test", "commit", strings.NewReader(""), &output, &output)
@@ -303,8 +312,8 @@ models: []
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(rebuiltData), "schemaVersion") {
-		t.Fatalf("rebuilt lock still contains schemaVersion:\n%s", rebuiltData)
+	if !strings.Contains(string(rebuiltData), "schemaVersion: 1") {
+		t.Fatalf("rebuilt lock has no current schemaVersion:\n%s", rebuiltData)
 	}
 
 	configuration = "serverUrl: " + server.URL + `

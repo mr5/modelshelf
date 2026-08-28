@@ -1,0 +1,77 @@
+name: modelshelf
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MODELSHELF_STORAGE_ROOT: /data
+      MODELSHELF_CATALOG_INDEX_PATH: ${MODELSHELF_CATALOG_INDEX_PATH:-/data/.modelshelf/catalog.sqlite3}
+      MODELSHELF_IMPORT_ROOTS: ${MODELSHELF_IMPORT_ROOTS:-}
+      MODELSHELF_UI_DIST: /app/ui
+      MODELSHELF_CLIENT_DIST: /app/client
+      MODELSHELF_ADMIN_PASSWORD_HASH: ${MODELSHELF_ADMIN_PASSWORD_HASH:?Set an Argon2id password hash}
+      MODELSHELF_WRITE_TOKENS: ${MODELSHELF_WRITE_TOKENS:-}
+      MODELSHELF_SESSION_SECRET: ${MODELSHELF_SESSION_SECRET:?Set a random session secret}
+      MODELSHELF_SESSION_COOKIE_SECURE: ${MODELSHELF_SESSION_COOKIE_SECURE:-false}
+      MODELSHELF_PUBLIC_BASE_URL: ${MODELSHELF_PUBLIC_BASE_URL:-}
+      MODELSHELF_PUBLIC_ARTIFACTS: ${MODELSHELF_PUBLIC_ARTIFACTS:-true}
+      MODELSHELF_MAX_CONCURRENT_DOWNLOADS: ${MODELSHELF_MAX_CONCURRENT_DOWNLOADS:-2}
+      MODELSHELF_MAX_CONCURRENT_DOWNLOADS_PER_SOURCE: ${MODELSHELF_MAX_CONCURRENT_DOWNLOADS_PER_SOURCE:-1}
+      MODELSHELF_NFS_ADVERTISED_HOST: ${MODELSHELF_NFS_ADVERTISED_HOST:-127.0.0.1}
+      # Ganesha's real container listen port is fixed; the optional advertised port
+      # also becomes the Docker host port when explicitly configured.
+      MODELSHELF_NFS_PORT: 2049
+      MODELSHELF_NFS_ADVERTISED_PORT: ${MODELSHELF_NFS_ADVERTISED_PORT:-}
+      MODELSHELF_NFS_EXPORT_PATH: /modelshelf
+      MODELSHELF_GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      MODELSHELF_HUGGINGFACE_MIRROR: ${MODELSHELF_HUGGINGFACE_MIRROR:-}
+      MODELSHELF_MODELSCOPE_CN_MIRROR: ${MODELSHELF_MODELSCOPE_CN_MIRROR:-}
+      MODELSHELF_MODELSCOPE_AI_MIRROR: ${MODELSHELF_MODELSCOPE_AI_MIRROR:-}
+      MODELSHELF_HTTP_PROXY: ${MODELSHELF_HTTP_PROXY:-}
+      # The image user intentionally has no login home. Give the official ModelScope SDK
+      # writable config/cache paths inside the server volume.
+      MODELSCOPE_HOME: /data/.modelshelf/providers/modelscope/config
+      MODELSCOPE_CACHE: /data/.modelshelf/providers/modelscope/cache
+      HF_TOKEN: ${HF_TOKEN:-}
+      MODELSCOPE_CN_API_TOKEN: ${MODELSCOPE_CN_API_TOKEN:-}
+      MODELSCOPE_AI_API_TOKEN: ${MODELSCOPE_AI_API_TOKEN:-}
+      KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
+    volumes:
+      - artifacts:/data
+    ports:
+      - "${MODELSHELF_HTTP_PORT:-8080}:8080"
+    security_opt:
+      - no-new-privileges:true
+
+  nfs:
+    build:
+      context: docker/nfs
+    restart: unless-stopped
+    environment:
+      MODELSHELF_NFS_CLIENTS: ${MODELSHELF_NFS_CLIENTS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fd00::/8}
+      MODELSHELF_NFS_ALLOW_PUBLIC: ${MODELSHELF_NFS_ALLOW_PUBLIC:-false}
+    volumes:
+      - artifacts:/export:ro
+    ports:
+      - "${MODELSHELF_NFS_ADVERTISED_PORT:-2049}:2049/tcp"
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_READ_SEARCH
+      - NET_BIND_SERVICE
+      - SETGID
+      - SETUID
+      - SYS_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+      - /var/lib/nfs
+
+volumes:
+  artifacts:

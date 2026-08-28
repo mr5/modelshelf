@@ -1,0 +1,9 @@
+.git
+.venv
+node_modules
+**/__pycache__
+**/*.pyc
+**/dist
+data
+.env
+coverage

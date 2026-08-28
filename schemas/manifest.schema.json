@@ -1,0 +1,165 @@
+{
+  "$defs": {
+    "FileEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "size": {
+          "minimum": 0,
+          "title": "Size",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "title": "FileEntry",
+      "type": "object"
+    },
+    "Provider": {
+      "enum": [
+        "huggingface",
+        "modelscope-cn",
+        "modelscope-ai",
+        "github-release",
+        "kaggle",
+        "http",
+        "filesystem"
+      ],
+      "title": "Provider",
+      "type": "string"
+    },
+    "SourceReference": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "requestedRevision": {
+          "minLength": 1,
+          "title": "Requestedrevision",
+          "type": "string"
+        },
+        "resolvedRevision": {
+          "minLength": 1,
+          "title": "Resolvedrevision",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        }
+      },
+      "required": [
+        "provider",
+        "id",
+        "requestedRevision",
+        "resolvedRevision"
+      ],
+      "title": "SourceReference",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "artifactId": {
+      "minLength": 1,
+      "title": "Artifactid",
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "version": {
+      "minLength": 1,
+      "title": "Version",
+      "type": "string"
+    },
+    "format": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Format"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceReference"
+    },
+    "contentSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Contentsha256",
+      "type": "string"
+    },
+    "createdAt": {
+      "format": "date-time",
+      "title": "Createdat",
+      "type": "string"
+    },
+    "totalSize": {
+      "minimum": 0,
+      "title": "Totalsize",
+      "type": "integer"
+    },
+    "fileCount": {
+      "minimum": 0,
+      "title": "Filecount",
+      "type": "integer"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/FileEntry"
+      },
+      "title": "Files",
+      "type": "array"
+    }
+  },
+  "required": [
+    "artifactId",
+    "name",
+    "version",
+    "source",
+    "contentSha256",
+    "createdAt",
+    "totalSize",
+    "fileCount",
+    "files"
+  ],
+  "title": "ArtifactManifest",
+  "type": "object"
+}

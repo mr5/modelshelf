@@ -1,0 +1,30 @@
+[project]
+name = "modelshelf-server"
+version = "0.1.0"
+description = "ModelShelf API and ingestion worker"
+requires-python = ">=3.12"
+dependencies = [
+  "modelshelf-core",
+  "argon2-cffi>=25.1,<26",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "pydantic-settings>=2.10,<3",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+providers = [
+  "huggingface-hub>=0.34,<2",
+  "kagglehub>=1.0,<2",
+  "modelscope-hub>=0.2,<1",
+]
+
+[project.scripts]
+modelshelf-server = "modelshelf_server.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/modelshelf_server"]

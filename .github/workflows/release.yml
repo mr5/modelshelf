@@ -1,0 +1,35 @@
+name: Release client
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: packages/client/go.mod
+          cache-dependency-path: packages/client/go.sum
+      - name: Test client
+        working-directory: packages/client
+        run: go test -race ./...
+      - name: Publish client archives
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+          workdir: packages/client
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,400 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+
+import huggingface_hub
+import kagglehub  # type: ignore[import-untyped]
+import modelshelf_server.providers as provider_module
+import pytest
+from modelshelf_core import Provider
+from modelshelf_server.providers import (
+    ProviderResult,
+    _parse_ls_remote,
+    discover_revisions,
+    download_github_release,
+    download_kaggle,
+    estimate_download,
+    run_provider,
+    search_models,
+)
+
+
+def test_modelscope_ls_remote_prefers_peeled_tag_then_branch() -> None:
+    output = "\n".join(
+        [
+            f"{'1' * 40}\trefs/tags/v1",
+            f"{'2' * 40}\trefs/tags/v1^{{}}",
+            f"{'3' * 40}\trefs/heads/v1",
+        ]
+    )
+    assert _parse_ls_remote(output, "v1") == "2" * 40
+    assert _parse_ls_remote(f"{'4' * 40}\trefs/heads/master\n", "master") == "4" * 40
+    with pytest.raises(RuntimeError, match="did not resolve"):
+        _parse_ls_remote("", "missing")
+
+
+def test_modelscope_sites_use_independent_endpoints_and_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODELSCOPE_CN_API_TOKEN", "cn-token")
+    monkeypatch.setenv("MODELSCOPE_AI_API_TOKEN", "ai-token")
+
+    assert provider_module._provider_endpoint(Provider.MODELSCOPE_CN, None, False) == (
+        "https://modelscope.cn"
+    )
+    assert provider_module._provider_endpoint(Provider.MODELSCOPE_AI, None, False) == (
+        "https://modelscope.ai"
+    )
+    assert provider_module._modelscope_token(Provider.MODELSCOPE_CN) == "cn-token"
+    assert provider_module._modelscope_token(Provider.MODELSCOPE_AI) == "ai-token"
+
+
+def test_modelscope_authentication_error_names_the_selected_site_token() -> None:
+    class AuthenticationError(RuntimeError):
+        pass
+
+    translated = provider_module._translate_modelscope_error(
+        AuthenticationError("secret upstream response"),
+        provider=Provider.MODELSCOPE_CN,
+        endpoint="https://modelscope.cn",
+    )
+
+    assert translated is not None
+    assert "modelscope.cn" in str(translated)
+    assert "MODELSCOPE_CN_API_TOKEN" in str(translated)
+    assert "secret upstream response" not in str(translated)
+
+
+def test_modelscope_revision_resolution_prefers_anonymous_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, str]] = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return f"{'4' * 40}\trefs/heads/master\n".encode(), b""
+
+    async def create_process(*_args: object, **kwargs: object) -> Process:
+        calls.append(kwargs["env"])  # type: ignore[arg-type]
+        return Process()
+
+    monkeypatch.setattr(provider_module.asyncio, "create_subprocess_exec", create_process)
+    resolved = asyncio.run(
+        provider_module._resolve_modelscope_revision(
+            Provider.MODELSCOPE_CN,
+            "owner/model",
+            "master",
+            endpoint="https://modelscope.cn",
+            token="stale-token",
+        )
+    )
+
+    assert resolved == "4" * 40
+    assert len(calls) == 1
+    assert "GIT_CONFIG_VALUE_0" not in calls[0]
+
+
+def test_modelscope_revision_resolution_uses_token_after_anonymous_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, str]]] = []
+
+    class Process:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            if self.returncode:
+                return b"", b"authentication required"
+            return f"{'5' * 40}\trefs/heads/private\n".encode(), b""
+
+    async def create_process(*args: object, **kwargs: object) -> Process:
+        environment = kwargs["env"]  # type: ignore[assignment]
+        calls.append((args, environment))
+        return Process(1 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(provider_module.asyncio, "create_subprocess_exec", create_process)
+    resolved = asyncio.run(
+        provider_module._resolve_modelscope_revision(
+            Provider.MODELSCOPE_CN,
+            "owner/private-model",
+            "private",
+            endpoint="https://modelscope.cn",
+            token="private-token",
+        )
+    )
+
+    assert resolved == "5" * 40
+    assert len(calls) == 2
+    assert "GIT_CONFIG_VALUE_0" not in calls[0][1]
+    assert calls[1][1]["GIT_CONFIG_KEY_0"] == "http.extraHeader"
+    assert calls[1][1]["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
+    assert "private-token" not in " ".join(str(argument) for argument in calls[1][0])
+
+
+def test_sdk_downloads_use_a_supervised_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_isolated(*args: object, **kwargs: object) -> ProviderResult:
+        captured["provider"] = args[0]
+        captured["direct"] = kwargs["direct"]
+        return ProviderResult(resolved_revision="a" * 40)
+
+    monkeypatch.setattr(provider_module, "_isolated_download", fake_isolated)
+
+    async def exercise() -> ProviderResult:
+        return await run_provider(
+            Provider.MODELSCOPE_CN,
+            "owner/model",
+            "master",
+            tmp_path / "artifact",
+            lambda _downloaded, _total: asyncio.sleep(0),
+            github_token=None,
+        )
+
+    result = asyncio.run(exercise())
+    assert result.resolved_revision == "a" * 40
+    assert captured == {"provider": Provider.MODELSCOPE_CN, "direct": False}
+
+
+def test_kaggle_latest_is_resolved_from_official_cache_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cached = tmp_path / "cache/models/owner/model/framework/variation/versions/7"
+    cached.mkdir(parents=True)
+    (cached / "model.bin").write_bytes(b"weights")
+
+    def fake_download(handle: str, *, force_download: bool) -> str:
+        assert handle == "owner/model/framework/variation"
+        assert force_download
+        return str(cached)
+
+    monkeypatch.setattr(kagglehub, "model_download", fake_download)
+    destination = tmp_path / "stage/content"
+
+    async def run() -> None:
+        result = await download_kaggle(
+            "owner/model/framework/variation",
+            "latest",
+            destination,
+            lambda _downloaded, _total: asyncio.sleep(0),
+        )
+        assert result.resolved_revision == "version:7"
+
+    asyncio.run(run())
+    assert (destination / "model.bin").read_bytes() == b"weights"
+
+
+def test_github_release_resolves_release_id_and_downloads_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"release-asset"
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/repos/owner/repo/releases/latest":
+                body = json.dumps(
+                    {
+                        "id": 42,
+                        "tag_name": "v1.2.3",
+                        "html_url": "https://github.test/owner/repo/releases/tag/v1.2.3",
+                        "assets": [
+                            {
+                                "name": "model.gguf",
+                                "size": len(payload),
+                                "browser_download_url": (
+                                    f"http://127.0.0.1:{self.server.server_port}/asset"
+                                ),
+                            }
+                        ],
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/asset":
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            self.send_error(404)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("GITHUB_API_URL", f"http://127.0.0.1:{server.server_port}")
+    progress: list[tuple[int, int | None]] = []
+
+    async def run() -> None:
+        result = await download_github_release(
+            "owner/repo",
+            "latest",
+            tmp_path / "destination",
+            lambda downloaded, total: _record_progress(progress, downloaded, total),
+            None,
+        )
+        assert result.resolved_revision == "release:42:v1.2.3"
+
+    try:
+        asyncio.run(run())
+    finally:
+        server.shutdown()
+        thread.join()
+    assert (tmp_path / "destination/model.gguf").read_bytes() == payload
+    assert progress[-1] == (len(payload), len(payload))
+
+
+async def _record_progress(
+    progress: list[tuple[int, int | None]], downloaded: int, total: int | None
+) -> None:
+    progress.append((downloaded, total))
+
+
+def test_huggingface_model_search_and_revision_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    estimate_endpoints: list[str] = []
+
+    def fake_model_info(
+        api: huggingface_hub.HfApi, _source_id: str, **_kwargs: object
+    ) -> SimpleNamespace:
+        estimate_endpoints.append(str(api.endpoint))
+        return SimpleNamespace(
+            sha="2" * 40,
+            siblings=[
+                SimpleNamespace(rfilename="config.json", size=120),
+                SimpleNamespace(rfilename="model.safetensors", size=2_000),
+            ],
+            pipeline_tag="text-generation",
+            library_name="transformers",
+            last_modified=None,
+        )
+
+    monkeypatch.setattr(
+        huggingface_hub.HfApi,
+        "list_models",
+        lambda _self, **_kwargs: [
+            SimpleNamespace(id="owner/tiny-model", downloads=42, pipeline_tag="text-generation")
+        ],
+    )
+    monkeypatch.setattr(
+        huggingface_hub.HfApi,
+        "list_repo_refs",
+        lambda _self, _source_id, **_kwargs: SimpleNamespace(
+            branches=[
+                SimpleNamespace(name="dev", target_commit="1" * 40),
+                SimpleNamespace(name="main", target_commit="2" * 40),
+            ],
+            tags=[SimpleNamespace(name="v1", target_commit="3" * 40)],
+        ),
+    )
+    monkeypatch.setattr(
+        huggingface_hub.HfApi,
+        "model_info",
+        fake_model_info,
+    )
+
+    async def run() -> None:
+        models = await search_models(Provider.HUGGINGFACE, "tiny", github_token=None)
+        assert models.models[0].id == "owner/tiny-model"
+        assert models.models[0].detail == "text-generation · 42 downloads"
+        revisions = await discover_revisions(
+            Provider.HUGGINGFACE, "owner/tiny-model", github_token=None
+        )
+        assert revisions.default_revision == "main"
+        assert [revision.name for revision in revisions.revisions] == ["main", "dev", "v1"]
+        assert revisions.revisions[0].resolved_revision == "2" * 40
+        estimate = await estimate_download(
+            Provider.HUGGINGFACE,
+            "owner/tiny-model",
+            "main",
+            github_token=None,
+        )
+        assert estimate.resolved_revision == "2" * 40
+        assert estimate.total_size == 2_120
+        assert estimate.file_count == 2
+        assert estimate.as_dict()["downloadable"] is True
+        mirrored = await estimate_download(
+            Provider.HUGGINGFACE,
+            "owner/tiny-model",
+            "main",
+            github_token=None,
+            huggingface_mirror="https://mirror.example",
+        )
+        direct = await estimate_download(
+            Provider.HUGGINGFACE,
+            "owner/tiny-model",
+            "main",
+            github_token=None,
+            huggingface_mirror="https://mirror.example",
+            disable_mirror=True,
+        )
+        assert mirrored.hub_url == "https://huggingface.co/owner/tiny-model/tree/main"
+        assert direct.hub_url == mirrored.hub_url
+
+    asyncio.run(run())
+    assert estimate_endpoints == [
+        "https://huggingface.co",
+        "https://mirror.example",
+        "https://huggingface.co",
+    ]
+
+
+def test_generic_http_discovery_is_explicitly_unsupported() -> None:
+    async def run() -> None:
+        models = await search_models(Provider.HTTP, "https://example.test", github_token=None)
+        revisions = await discover_revisions(
+            Provider.HTTP, "https://example.test/model.tar", github_token=None
+        )
+        assert not models.supports_search
+        assert not revisions.supports_discovery
+        assert revisions.default_revision == "content"
+
+    asyncio.run(run())
+
+
+def test_sdk_proxy_bypass_uses_an_isolated_provider_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_isolated(
+        provider: Provider,
+        source_id: str,
+        revision: str,
+        **network: object,
+    ) -> provider_module.DownloadEstimate:
+        captured.update(network)
+        return provider_module.DownloadEstimate(provider, source_id, revision, "a" * 40, 100, 1)
+
+    monkeypatch.setattr(provider_module, "_isolated_estimate", fake_isolated)
+
+    async def run() -> None:
+        result = await estimate_download(
+            Provider.HUGGINGFACE,
+            "owner/model",
+            "main",
+            github_token=None,
+            proxy_url="http://proxy.internal:3128",
+            disable_proxy=True,
+        )
+        assert result.total_size == 100
+
+    asyncio.run(run())
+    assert captured["disable_mirror"] is False

@@ -1,0 +1,16 @@
+.DS_Store
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+dist/
+.vite/
+coverage/
+*.tsbuildinfo
+coverage.out
+packages/client/bin/
+packages/client/dist/
+.env
+*.log
+data/
+packages/ui/public/config.js

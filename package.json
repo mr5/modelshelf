@@ -1,0 +1,15 @@
+{
+  "name": "modelshelf",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.22.0",
+  "scripts": {
+    "build": "pnpm --filter @modelshelf/ui build",
+    "dev": "pnpm --filter @modelshelf/ui dev",
+    "typecheck": "pnpm --filter @modelshelf/ui typecheck",
+    "format": "prettier --write packages/ui"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  }
+}

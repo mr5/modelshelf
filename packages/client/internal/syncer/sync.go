@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/modelshelf/modelshelf/client/internal/api"
-	"github.com/modelshelf/modelshelf/client/internal/catalog"
-	"github.com/modelshelf/modelshelf/client/internal/config"
-	"github.com/modelshelf/modelshelf/client/internal/domain"
+	"github.com/mr5/modelshelf/client/internal/api"
+	"github.com/mr5/modelshelf/client/internal/catalog"
+	"github.com/mr5/modelshelf/client/internal/config"
+	"github.com/mr5/modelshelf/client/internal/domain"
 )
 
 type directoryMode struct {

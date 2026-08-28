@@ -19,16 +19,16 @@ import (
 	"time"
 
 	charmterm "github.com/charmbracelet/x/term"
-	"github.com/modelshelf/modelshelf/client/internal/api"
-	"github.com/modelshelf/modelshelf/client/internal/catalog"
-	"github.com/modelshelf/modelshelf/client/internal/config"
-	"github.com/modelshelf/modelshelf/client/internal/domain"
-	"github.com/modelshelf/modelshelf/client/internal/lockfile"
-	"github.com/modelshelf/modelshelf/client/internal/mount"
-	"github.com/modelshelf/modelshelf/client/internal/passwordhash"
-	"github.com/modelshelf/modelshelf/client/internal/syncer"
-	"github.com/modelshelf/modelshelf/client/internal/tui"
-	clientupgrade "github.com/modelshelf/modelshelf/client/internal/upgrade"
+	"github.com/mr5/modelshelf/client/internal/api"
+	"github.com/mr5/modelshelf/client/internal/catalog"
+	"github.com/mr5/modelshelf/client/internal/config"
+	"github.com/mr5/modelshelf/client/internal/domain"
+	"github.com/mr5/modelshelf/client/internal/lockfile"
+	"github.com/mr5/modelshelf/client/internal/mount"
+	"github.com/mr5/modelshelf/client/internal/passwordhash"
+	"github.com/mr5/modelshelf/client/internal/syncer"
+	"github.com/mr5/modelshelf/client/internal/tui"
+	clientupgrade "github.com/mr5/modelshelf/client/internal/upgrade"
 	"github.com/spf13/cobra"
 )
 
@@ -116,7 +116,7 @@ func (application *Application) upgradeCommand() *cobra.Command {
 			if github || targetVersion != "" {
 				repository := os.Getenv("MODELSHELF_GITHUB_REPOSITORY")
 				if repository == "" {
-					repository = "modelshelf/modelshelf"
+					repository = "mr5/modelshelf"
 				}
 				if targetVersion == "" {
 					apiBase := os.Getenv("MODELSHELF_GITHUB_API_URL")

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/modelshelf/modelshelf/client/internal/domain"
+	"github.com/mr5/modelshelf/client/internal/domain"
 )
 
 func TestPathFollowsConfig(t *testing.T) {

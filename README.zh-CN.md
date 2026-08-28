@@ -139,7 +139,7 @@ curl -fsSL 'https://modelshelf.example/install.sh' | sh
 或安装 GitHub 最新版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/modelshelf/modelshelf/main/packages/client/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mr5/modelshelf/main/packages/client/install.sh | sh
 ```
 
 安装脚本自动识别 Linux/macOS 和 amd64/arm64，并校验 SHA-256。默认安装到

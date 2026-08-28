@@ -13,8 +13,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/modelshelf/modelshelf/client/internal/api"
-	"github.com/modelshelf/modelshelf/client/internal/config"
+	"github.com/mr5/modelshelf/client/internal/api"
+	"github.com/mr5/modelshelf/client/internal/config"
 )
 
 func Mount(ctx context.Context, configuration config.Config, client *api.Client) error {

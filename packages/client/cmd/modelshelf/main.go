@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/modelshelf/modelshelf/client/internal/cli"
+	"github.com/mr5/modelshelf/client/internal/cli"
 )
 
 var (

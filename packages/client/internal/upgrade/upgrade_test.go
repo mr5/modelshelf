@@ -92,7 +92,7 @@ func TestCompareVersions(t *testing.T) {
 
 func TestLatestGitHubVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/repos/modelshelf/modelshelf/releases/latest" {
+		if request.URL.Path != "/repos/mr5/modelshelf/releases/latest" {
 			http.NotFound(writer, request)
 			return
 		}
@@ -104,7 +104,7 @@ func TestLatestGitHubVersion(t *testing.T) {
 	}))
 	defer server.Close()
 	version, err := LatestGitHubVersion(
-		context.Background(), server.Client(), server.URL, "modelshelf/modelshelf", "token",
+		context.Background(), server.Client(), server.URL, "mr5/modelshelf", "token",
 	)
 	if err != nil || version != "v1.2.0" {
 		t.Fatalf("version = %q err=%v", version, err)

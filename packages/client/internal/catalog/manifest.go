@@ -17,7 +17,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/modelshelf/modelshelf/client/internal/domain"
+	"github.com/mr5/modelshelf/client/internal/domain"
 )
 
 const ManifestPath = ".modelshelf/manifest.json"

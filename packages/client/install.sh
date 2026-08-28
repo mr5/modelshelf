@@ -25,7 +25,7 @@ case "$(uname -m)" in
   *) fail "unsupported architecture: $(uname -m)" ;;
 esac
 
-modelshelf_repo=${MODELSHELF_GITHUB_REPOSITORY:-modelshelf/modelshelf}
+modelshelf_repo=${MODELSHELF_GITHUB_REPOSITORY:-mr5/modelshelf}
 if [ -n "${MODELSHELF_VERSION:-}" ]; then
   case "$MODELSHELF_VERSION" in
     *[!A-Za-z0-9._-]*|'') fail "MODELSHELF_VERSION contains invalid characters" ;;

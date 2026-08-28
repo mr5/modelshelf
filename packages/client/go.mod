@@ -1,4 +1,4 @@
-module github.com/modelshelf/modelshelf/client
+module github.com/mr5/modelshelf/client
 
 go 1.25.0
 

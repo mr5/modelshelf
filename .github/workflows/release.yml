@@ -8,9 +8,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   client:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -24,6 +29,9 @@ jobs:
       - name: Test client
         working-directory: packages/client
         run: go test -race ./...
+      - name: Vet client
+        working-directory: packages/client
+        run: go vet ./...
       - name: Publish client archives
         uses: goreleaser/goreleaser-action@v7
         with:

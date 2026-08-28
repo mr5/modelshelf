@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/modelshelf/modelshelf/client/internal/domain"
+	"github.com/mr5/modelshelf/client/internal/domain"
 	"gopkg.in/yaml.v3"
 )
 

@@ -18,7 +18,7 @@ curl -fsSL 'https://modelshelf.example/install.sh' | sh
 Install the latest GitHub release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/modelshelf/modelshelf/main/packages/client/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mr5/modelshelf/main/packages/client/install.sh | sh
 ```
 
 The installer supports Linux/macOS on amd64/arm64 and verifies SHA-256. Set

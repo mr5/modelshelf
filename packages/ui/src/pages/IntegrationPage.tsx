@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import type { ServerInfo } from "../types.ts";
 
-const githubInstaller = "https://raw.githubusercontent.com/modelshelf/modelshelf/main/packages/client/install.sh";
+const githubInstaller = "https://raw.githubusercontent.com/mr5/modelshelf/main/packages/client/install.sh";
 
 function shellQuote(value: string) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;

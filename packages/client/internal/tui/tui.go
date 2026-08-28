@@ -9,10 +9,10 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/modelshelf/modelshelf/client/internal/api"
-	"github.com/modelshelf/modelshelf/client/internal/catalog"
-	"github.com/modelshelf/modelshelf/client/internal/config"
-	"github.com/modelshelf/modelshelf/client/internal/syncer"
+	"github.com/mr5/modelshelf/client/internal/api"
+	"github.com/mr5/modelshelf/client/internal/catalog"
+	"github.com/mr5/modelshelf/client/internal/config"
+	"github.com/mr5/modelshelf/client/internal/syncer"
 )
 
 type row struct {

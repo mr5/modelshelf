@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	clientconfig "github.com/modelshelf/modelshelf/client/internal/config"
-	"github.com/modelshelf/modelshelf/client/internal/domain"
-	"github.com/modelshelf/modelshelf/client/internal/lockfile"
+	clientconfig "github.com/mr5/modelshelf/client/internal/config"
+	"github.com/mr5/modelshelf/client/internal/domain"
+	"github.com/mr5/modelshelf/client/internal/lockfile"
 )
 
 func TestStatusAndVerifyStableExitCodes(t *testing.T) {

@@ -8,7 +8,7 @@ COPY packages/ui packages/ui
 RUN pnpm --filter @modelshelf/ui build
 
 FROM golang:1.25-bookworm AS client
-ARG MODELSHELF_VERSION=0.1.0-beta.5
+ARG MODELSHELF_VERSION=0.1.0-beta.6
 ARG MODELSHELF_COMMIT=unknown
 WORKDIR /src
 COPY packages/client/go.mod packages/client/go.sum packages/client/
@@ -30,7 +30,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MODELSCOPE_CACHE=/data/.modelshelf/providers/modelscope/cache
 WORKDIR /app
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates && \
+    apt-get install -y --no-install-recommends git git-lfs ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 COPY packages/core packages/core
 COPY packages/server packages/server

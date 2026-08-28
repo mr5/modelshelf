@@ -97,6 +97,7 @@ volume。NFS-Ganesha 以只读方式挂载该 volume，只导出服务端的 `/d
 在 Compose 中，显式设置的 advertised port 同时是映射到容器 2049 的宿主机端口。公网 CIDR
 必须同时显式设置 `MODELSHELF_NFS_ALLOW_PUBLIC=true`。裸机部署使用
 `MODELSHELF_STORAGE_ROOT` 指定数据目录，并让系统 NFS 服务只读导出其中的 `artifacts/`。
+裸机运行 ModelScope 下载还需要安装 `git` 和 `git-lfs`；服务端镜像已经内置二者。
 
 Artifact 页面和只读目录 API 默认公开。设置 `MODELSHELF_PUBLIC_ARTIFACTS=false` 后需要 Web
 session 或 bearer token。任务创建和所有管理操作始终需要认证。

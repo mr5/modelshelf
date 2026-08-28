@@ -36,8 +36,9 @@ docker build -t modelshelf-nfs:acceptance docker/nfs
 - Hugging Face `hf-internal-testing/tiny-random-bert`: `main` resolved to
   `f171d7baecaf37b5da5a3616d8833b9969753535`; all 10 files passed full and unexpected-file
   verification.
-- ModelScope CN `apeganov/tiny-model-for-testing-downloading`: `master` resolved to
-  `52a7cb1082bdfd14e5195e5722e0584fb271638e` and passed full verification.
+- ModelScope CN `pandas007/tiny-random-BertForQuestionAnswering`: `master` resolved to
+  `35d98d94e4cb18eb813a3d2613b7b8565a91d466`; all 10 files (1,345,016 bytes) passed full and
+  unexpected-file verification in the release container.
 - GitHub Releases: a local API contract server verified release lookup, id/tag resolution, streamed
   assets, and byte progress.
 - Kaggle Models: the official `kagglehub.model_download` adapter returned `/versions/7`, which

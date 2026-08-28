@@ -53,6 +53,7 @@ async def _main(payload: dict[str, Any]) -> None:
         payload["revision"],
         Path(payload["destination"]),
         progress,
+        expected_resolved_revision=payload.get("expectedResolvedRevision"),
         **common,
     )
     _emit(

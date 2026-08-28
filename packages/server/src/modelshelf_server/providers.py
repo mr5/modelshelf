@@ -8,7 +8,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +25,7 @@ OFFICIAL_HUGGINGFACE_ENDPOINT = "https://huggingface.co"
 OFFICIAL_MODELSCOPE_CN_ENDPOINT = "https://modelscope.cn"
 OFFICIAL_MODELSCOPE_AI_ENDPOINT = "https://modelscope.ai"
 MODELSCOPE_PROVIDERS = frozenset({Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI})
-SDK_DOWNLOAD_PROVIDERS = frozenset(
+ISOLATED_DOWNLOAD_PROVIDERS = frozenset(
     {Provider.HUGGINGFACE, Provider.KAGGLE} | MODELSCOPE_PROVIDERS
 )
 _WORKER_PREFIX = "MODELSHELF_JSON:"
@@ -270,18 +272,26 @@ def _translate_modelscope_error(
 
 
 def _directory_size(root: Path) -> int:
-    return sum(item.stat().st_size for item in root.rglob("*") if item.is_file())
+    return sum(
+        item.stat().st_size
+        for item in root.rglob("*")
+        if item.is_file() and ".git" not in item.relative_to(root).parts
+    )
 
 
 async def _blocking_download(
-    operation: Callable[[], str], destination: Path, progress: Progress
+    operation: Callable[[], str],
+    destination: Path,
+    progress: Progress,
+    measure: Callable[[Path], int] = _directory_size,
 ) -> str:
     future = asyncio.create_task(asyncio.to_thread(operation))
     while not future.done():
-        await progress(_directory_size(destination), None)
+        await progress(measure(destination), None)
         await asyncio.sleep(0.5)
     result = await future
-    await progress(_directory_size(destination), _directory_size(destination))
+    final_size = _directory_size(destination)
+    await progress(final_size, final_size)
     return result
 
 
@@ -718,31 +728,16 @@ async def _estimate_modelscope(
     endpoint: str,
     token: str | None,
 ) -> DownloadEstimate:
-    try:
-        from modelscope_hub.compat import LegacyHubApi
-    except ImportError as error:
-        raise _optional_import_error("ModelScope", "modelscope-hub", error) from error
-    api = LegacyHubApi(endpoint=endpoint, token=token)
-    try:
-        files = await asyncio.to_thread(
-            api.get_model_files,
-            source_id,
-            revision=revision,
-            recursive=True,
-        )
-    except Exception as error:
-        translated = _translate_modelscope_error(error, provider=provider, endpoint=endpoint)
-        if translated:
-            raise translated from error
-        raise
-    sizes = [item.get("Size") for item in files if isinstance(item, dict)]
-    total_size = (
-        sum(size for size in sizes if isinstance(size, int))
-        if sizes and all(isinstance(size, int) for size in sizes)
-        else None
-    )
     resolved = await _resolve_modelscope_revision(
         provider, source_id, revision, endpoint=endpoint, token=token
+    )
+    total_size, file_count = await asyncio.to_thread(
+        _estimate_modelscope_git,
+        source_id,
+        revision,
+        resolved,
+        endpoint,
+        token,
     )
     official_endpoint = _modelscope_official_endpoint(provider)
     return DownloadEstimate(
@@ -751,7 +746,7 @@ async def _estimate_modelscope(
         revision,
         resolved,
         total_size,
-        len(sizes),
+        file_count,
         f"{official_endpoint}/models/{source_id}",
     )
 
@@ -935,9 +930,7 @@ def _direct_worker_environment() -> dict[str, str]:
 
 
 def _worker_error(record: dict[str, Any]) -> Exception:
-    message = safe_error_message(
-        str(record.get("message") or "isolated provider operation failed")
-    )
+    message = safe_error_message(str(record.get("message") or "isolated provider operation failed"))
     kind = record.get("errorKind")
     if kind == "ValueError":
         return ValueError(message)
@@ -1046,6 +1039,7 @@ async def _isolated_download(
     modelscope_ai_mirror: str | None,
     disable_mirror: bool,
     direct: bool,
+    expected_resolved_revision: str | None,
 ) -> ProviderResult:
     payload = {
         "operation": "download",
@@ -1058,6 +1052,7 @@ async def _isolated_download(
         "modelscopeCnMirror": modelscope_cn_mirror,
         "modelscopeAiMirror": modelscope_ai_mirror,
         "disableMirror": disable_mirror,
+        "expectedResolvedRevision": expected_resolved_revision,
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -1232,33 +1227,218 @@ async def download_modelscope(
     progress: Progress,
     endpoint: str,
     token: str | None,
+    expected_resolved_revision: str | None = None,
 ) -> ProviderResult:
-    cache = destination.parent / ".modelscope-cache"
-    try:
-        from modelscope_hub.compat import snapshot_download
-    except ImportError as error:
-        raise _optional_import_error("ModelScope", "modelscope-hub", error) from error
     resolved = await _resolve_modelscope_revision(
         provider, source_id, revision, endpoint=endpoint, token=token
     )
+    if expected_resolved_revision and resolved != expected_resolved_revision:
+        raise RuntimeError(
+            "ModelScope requested revision changed after preflight: "
+            f"expected {expected_resolved_revision}, got {resolved}"
+        )
+    await _download_modelscope_git(
+        source_id,
+        revision,
+        resolved,
+        destination,
+        progress,
+        endpoint,
+        token,
+    )
+    return ProviderResult(resolved_revision=resolved)
+
+
+async def _download_modelscope_git(
+    source_id: str,
+    revision: str,
+    resolved_revision: str,
+    destination: Path,
+    progress: Progress,
+    endpoint: str,
+    token: str | None,
+) -> None:
+    lfs_paths: set[Path] = set()
 
     def operation() -> str:
-        return str(
-            snapshot_download(
-                model_id=source_id,
-                revision=resolved,
-                cache_dir=str(cache),
-                local_dir=str(destination),
-                token=token,
-                endpoint=endpoint,
-            )
+        lfs = subprocess.run(
+            ["git", "lfs", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
         )
+        if lfs.returncode != 0:
+            raise ProviderUnavailable("ModelScope downloads require git-lfs")
+        shutil.rmtree(destination, ignore_errors=True)
+        environment = _prepare_modelscope_git_checkout(
+            source_id,
+            revision,
+            resolved_revision,
+            destination,
+            endpoint,
+            token,
+            skip_lfs=True,
+        )
+        lfs_paths.update(
+            path.relative_to(destination)
+            for path in destination.rglob("*")
+            if path.is_file() and _modelscope_lfs_pointer_size(path) is not None
+        )
+        environment.pop("GIT_LFS_SKIP_SMUDGE", None)
+        _checked_modelscope_git(["git", "-C", str(destination), "lfs", "pull"], environment)
+        _checked_modelscope_git(["git", "-C", str(destination), "lfs", "fsck"], environment)
+        shutil.rmtree(destination / ".git")
+        return str(destination)
 
-    try:
-        await _blocking_download(operation, destination, progress)
-    finally:
-        shutil.rmtree(cache, ignore_errors=True)
-    return ProviderResult(resolved_revision=resolved)
+    def download_size(root: Path) -> int:
+        git = root / ".git"
+        if not git.exists():
+            return _directory_size(root)
+        worktree_size = sum(
+            path.stat().st_size
+            for path in root.rglob("*")
+            if path.is_file()
+            and ".git" not in path.relative_to(root).parts
+            and path.relative_to(root) not in lfs_paths
+        )
+        lfs_size = sum(
+            path.stat().st_size
+            for directory in (git / "lfs" / "objects", git / "lfs" / "incomplete")
+            if directory.exists()
+            for path in directory.rglob("*")
+            if path.is_file()
+        )
+        return worktree_size + lfs_size
+
+    await _blocking_download(operation, destination, progress, download_size)
+
+
+def _modelscope_git_environment(token: str | None, *, skip_lfs: bool) -> dict[str, str]:
+    environment = os.environ.copy()
+    if skip_lfs:
+        environment["GIT_LFS_SKIP_SMUDGE"] = "1"
+    if token:
+        credential = base64.b64encode(f"oauth2:{token}".encode()).decode()
+        environment.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.extraHeader",
+                "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credential}",
+            }
+        )
+    return environment
+
+
+def _checked_modelscope_git(command: list[str], environment: dict[str, str]) -> str:
+    result = subprocess.run(
+        command,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = safe_error_message(result.stderr.strip() or result.stdout.strip())
+        raise ProviderRequestError(f"ModelScope Git operation failed: {detail}")
+    return result.stdout.strip()
+
+
+def _prepare_modelscope_git_checkout(
+    source_id: str,
+    revision: str,
+    resolved_revision: str,
+    destination: Path,
+    endpoint: str,
+    token: str | None,
+    *,
+    skip_lfs: bool,
+) -> dict[str, str]:
+    if shutil.which("git") is None:
+        raise ProviderUnavailable("ModelScope Git metadata lookup requires git")
+    remote = f"{endpoint.rstrip('/')}/{source_id}.git"
+    errors: list[ProviderRequestError] = []
+    for attempt_token in (None, token) if token else (None,):
+        shutil.rmtree(destination, ignore_errors=True)
+        destination.mkdir(parents=True)
+        environment = _modelscope_git_environment(attempt_token, skip_lfs=skip_lfs)
+        try:
+            _checked_modelscope_git(["git", "init", "--quiet", str(destination)], environment)
+            _checked_modelscope_git(
+                ["git", "-C", str(destination), "remote", "add", "origin", remote],
+                environment,
+            )
+            _checked_modelscope_git(
+                ["git", "-C", str(destination), "fetch", "--depth=1", "origin", revision],
+                environment,
+            )
+            fetched = _checked_modelscope_git(
+                ["git", "-C", str(destination), "rev-parse", "FETCH_HEAD^{commit}"],
+                environment,
+            )
+            if fetched != resolved_revision:
+                raise RuntimeError(
+                    "ModelScope requested revision changed before download: "
+                    f"expected {resolved_revision}, got {fetched}"
+                )
+            _checked_modelscope_git(
+                [
+                    "git",
+                    "-C",
+                    str(destination),
+                    "checkout",
+                    "--quiet",
+                    "--detach",
+                    "FETCH_HEAD",
+                ],
+                environment,
+            )
+            return environment
+        except ProviderRequestError as error:
+            errors.append(error)
+    raise errors[-1]
+
+
+def _modelscope_lfs_pointer_size(path: Path) -> int | None:
+    if path.is_symlink():
+        return None
+    with path.open("rb") as stream:
+        prefix = stream.read(512)
+    if not prefix.startswith(b"version https://git-lfs.github.com/spec/v1\n"):
+        return None
+    match = re.search(rb"(?:^|\n)size (\d+)(?:\n|$)", prefix)
+    return int(match.group(1)) if match else None
+
+
+def _modelscope_git_file_size(path: Path) -> int:
+    if path.is_symlink():
+        return len(os.readlink(path).encode())
+    return _modelscope_lfs_pointer_size(path) or path.stat().st_size
+
+
+def _estimate_modelscope_git(
+    source_id: str,
+    revision: str,
+    resolved_revision: str,
+    endpoint: str,
+    token: str | None,
+) -> tuple[int, int]:
+    with tempfile.TemporaryDirectory(prefix="modelshelf-modelscope-metadata-") as directory:
+        destination = Path(directory) / "repository"
+        _prepare_modelscope_git_checkout(
+            source_id,
+            revision,
+            resolved_revision,
+            destination,
+            endpoint,
+            token,
+            skip_lfs=True,
+        )
+        files = [
+            path
+            for path in destination.rglob("*")
+            if (path.is_file() or path.is_symlink()) and ".git" not in path.parts
+        ]
+        return sum(_modelscope_git_file_size(path) for path in files), len(files)
 
 
 def _parse_ls_remote(output: str, revision: str) -> str:
@@ -1495,9 +1675,10 @@ async def run_provider(
     proxy_url: str | None = None,
     disable_mirror: bool = False,
     disable_proxy: bool = False,
+    expected_resolved_revision: str | None = None,
     _isolated: bool = False,
 ) -> ProviderResult:
-    if provider in SDK_DOWNLOAD_PROVIDERS and not _isolated:
+    if provider in ISOLATED_DOWNLOAD_PROVIDERS and not _isolated:
         return await _isolated_download(
             provider,
             source_id,
@@ -1510,6 +1691,7 @@ async def run_provider(
             modelscope_ai_mirror=modelscope_ai_mirror,
             disable_mirror=disable_mirror,
             direct=disable_proxy,
+            expected_resolved_revision=expected_resolved_revision,
         )
     if provider is Provider.HUGGINGFACE:
         endpoint = _provider_endpoint(provider, huggingface_mirror, disable_mirror)
@@ -1530,6 +1712,7 @@ async def run_provider(
             progress,
             endpoint,
             _modelscope_token(provider),
+            expected_resolved_revision,
         )
     if provider is Provider.KAGGLE:
         return await download_kaggle(source_id, revision, destination, progress)

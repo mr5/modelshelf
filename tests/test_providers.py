@@ -149,43 +149,146 @@ def test_modelscope_revision_resolution_uses_token_after_anonymous_failure(
     assert "private-token" not in " ".join(str(argument) for argument in calls[1][0])
 
 
-def test_modelscope_download_uses_an_immutable_commit_without_legacy_revision_validation(
+def test_modelscope_download_uses_requested_revision_and_verifies_immutable_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     resolved = "e823e888ae179eb3be02c1a48899c4f828371376"
     captured: dict[str, object] = {}
 
-    def snapshot_download(**kwargs: object) -> str:
-        captured.update(kwargs)
-        destination = Path(str(kwargs["local_dir"]))
+    async def git_download(*args: object) -> None:
+        captured["source_id"] = args[0]
+        captured["revision"] = args[1]
+        captured["resolved"] = args[2]
+        destination = args[3]
+        assert isinstance(destination, Path)
         destination.mkdir(parents=True, exist_ok=True)
         (destination / "config.json").write_text("{}", encoding="utf-8")
-        return str(destination)
 
-    async def blocking_download(
-        operation: object, _destination: Path, _progress: object
-    ) -> str:
-        assert callable(operation)
-        return str(operation())
+    monkeypatch.setattr(provider_module, "_download_modelscope_git", git_download)
 
-    monkeypatch.setattr("modelscope_hub.compat.snapshot_download", snapshot_download)
-    monkeypatch.setattr(provider_module, "_blocking_download", blocking_download)
+    async def resolve(*_args: object, **_kwargs: object) -> str:
+        return resolved
+
+    monkeypatch.setattr(provider_module, "_resolve_modelscope_revision", resolve)
 
     result = asyncio.run(
         provider_module.download_modelscope(
             Provider.MODELSCOPE_CN,
             "Qwen/Qwen3.8-27B",
-            resolved,
+            "master",
             tmp_path / "artifact",
             lambda _downloaded, _total: asyncio.sleep(0),
+            "https://modelscope.cn",
+            None,
+            resolved,
+        )
+    )
+
+    assert result.resolved_revision == resolved
+    assert captured == {
+        "source_id": "Qwen/Qwen3.8-27B",
+        "revision": "master",
+        "resolved": resolved,
+    }
+
+
+def test_modelscope_download_rejects_a_revision_that_moves_during_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = "a" * 40
+    after = "b" * 40
+
+    async def resolve(*_args: object, **_kwargs: object) -> str:
+        return after
+
+    monkeypatch.setattr(provider_module, "_resolve_modelscope_revision", resolve)
+
+    with pytest.raises(RuntimeError, match="changed after preflight"):
+        asyncio.run(
+            provider_module.download_modelscope(
+                Provider.MODELSCOPE_CN,
+                "owner/model",
+                "master",
+                tmp_path / "artifact",
+                lambda _downloaded, _total: asyncio.sleep(0),
+                "https://modelscope.cn",
+                None,
+                before,
+            )
+        )
+
+
+def test_modelscope_git_estimate_uses_lfs_object_sizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def prepare(
+        _source_id: str,
+        _revision: str,
+        _resolved_revision: str,
+        destination: Path,
+        _endpoint: str,
+        _token: str | None,
+        *,
+        skip_lfs: bool,
+    ) -> dict[str, str]:
+        assert skip_lfs is True
+        destination.mkdir(parents=True)
+        (destination / ".gitattributes").write_text("*.bin filter=lfs\n", encoding="utf-8")
+        (destination / "config.json").write_text("{}", encoding="utf-8")
+        (destination / "model.bin").write_text(
+            f"version https://git-lfs.github.com/spec/v1\noid sha256:{'a' * 64}\nsize 1048576\n",
+            encoding="utf-8",
+        )
+        git = destination / ".git"
+        git.mkdir()
+        (git / "index").write_bytes(b"ignored")
+        return {}
+
+    monkeypatch.setattr(provider_module, "_prepare_modelscope_git_checkout", prepare)
+
+    total_size, file_count = provider_module._estimate_modelscope_git(
+        "owner/model",
+        "master",
+        "a" * 40,
+        "https://modelscope.cn",
+        None,
+    )
+
+    assert total_size == 1048576 + len("*.bin filter=lfs\n") + len("{}")
+    assert file_count == 3
+
+
+def test_modelscope_estimate_resolves_revision_before_reading_git_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = "d" * 40
+    calls: list[tuple[object, ...]] = []
+
+    async def resolve(*args: object, **_kwargs: object) -> str:
+        calls.append(args)
+        return resolved
+
+    def estimate(*args: object) -> tuple[int, int]:
+        calls.append(args)
+        return 1234, 5
+
+    monkeypatch.setattr(provider_module, "_resolve_modelscope_revision", resolve)
+    monkeypatch.setattr(provider_module, "_estimate_modelscope_git", estimate)
+
+    result = asyncio.run(
+        provider_module._estimate_modelscope(
+            Provider.MODELSCOPE_CN,
+            "owner/model",
+            "master",
             "https://modelscope.cn",
             None,
         )
     )
 
     assert result.resolved_revision == resolved
-    assert captured["revision"] == resolved
-    assert captured["model_id"] == "Qwen/Qwen3.8-27B"
+    assert result.total_size == 1234
+    assert result.file_count == 5
+    assert calls[1][1:3] == ("master", resolved)
 
 
 def test_provider_error_detail_keeps_the_cause_and_redacts_credentials(
@@ -197,9 +300,7 @@ def test_provider_error_detail_keeps_the_cause_and_redacts_credentials(
         "?access_token=hf_private_token_value"
     )
 
-    detail = provider_module.provider_failure_detail(
-        Provider.HUGGINGFACE, "model search", error
-    )
+    detail = provider_module.provider_failure_detail(Provider.HUGGINGFACE, "model search", error)
 
     assert "RuntimeError" in detail
     assert "connection failed" in detail

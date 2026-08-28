@@ -101,7 +101,8 @@ namespace.
 With Compose, an advertised port also becomes the Docker host port mapped to container port 2049.
 Public CIDRs require the explicit `MODELSHELF_NFS_ALLOW_PUBLIC=true` opt-in. For bare-metal
 deployments, set `MODELSHELF_STORAGE_ROOT` and configure the system NFS server to export only its
-`artifacts/` child read-only.
+`artifacts/` child read-only. Bare-metal ModelScope downloads require `git` and `git-lfs`; the
+server image already includes both.
 
 Artifact browsing and read-only catalog APIs are public by default. Set
 `MODELSHELF_PUBLIC_ARTIFACTS=false` to require a Web session or bearer token. Task creation and all

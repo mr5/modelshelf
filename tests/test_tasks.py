@@ -205,6 +205,88 @@ def test_download_uses_the_preflight_resolved_revision(
     assert captured_revision == resolved
 
 
+def test_modelscope_download_uses_requested_revision_with_preflight_commit_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    resolved = "e" * 40
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        revision: str,
+        destination: Path,
+        _progress: Progress,
+        **options: object,
+    ) -> ProviderResult:
+        captured["revision"] = revision
+        captured["expected"] = options["expected_resolved_revision"]
+        (destination / "model.bin").write_bytes(b"model")
+        return ProviderResult(resolved_revision=resolved)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.MODELSCOPE_CN,
+                "owner/model",
+                "master",
+                resolved_revision=resolved,
+            )
+            await asyncio.wait_for(manager.queue.join(), timeout=2)
+            assert manager.store.get(task.id).status.value == "completed"  # type: ignore[union-attr]
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+    assert captured == {"revision": "master", "expected": resolved}
+
+
+def test_download_rejects_content_that_does_not_match_preflight_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: Progress,
+        **_options: object,
+    ) -> ProviderResult:
+        (destination / "model.bin").write_bytes(b"short")
+        return ProviderResult(resolved_revision="f" * 40)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.MODELSCOPE_CN,
+                "owner/model",
+                "master",
+                resolved_revision="f" * 40,
+                total_bytes=10,
+            )
+            await asyncio.wait_for(manager.queue.join(), timeout=2)
+            failed = manager.store.get(task.id)
+            assert failed is not None
+            assert failed.status.value == "failed"
+            assert "expected 10 bytes, got 5" in (failed.error or "")
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
 def test_known_preflight_size_drives_download_progress_and_speed(
     tmp_path: Path,
 ) -> None:
@@ -308,7 +390,7 @@ def test_active_task_can_pause_and_resume_from_preserved_stage(
                 Provider.MODELSCOPE_CN,
                 "owner/model",
                 "master",
-                total_bytes=1_000,
+                total_bytes=len(b"partial") + len(b"complete"),
             )
             await asyncio.wait_for(started.wait(), timeout=2)
             paused = await manager.pause(task.id)

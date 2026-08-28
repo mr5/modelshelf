@@ -1,6 +1,6 @@
 [project]
 name = "modelshelf-server"
-version = "0.1.0b5"
+version = "0.1.0b6"
 description = "ModelShelf API and ingestion worker"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,7 +16,7 @@ dependencies = [
 providers = [
   "huggingface-hub>=0.34,<2",
   "kagglehub>=1.0,<2",
-  "modelscope-hub>=0.2,<1",
+  "modelscope-hub>=0.3,<1",
 ]
 
 [project.scripts]

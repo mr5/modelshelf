@@ -620,11 +620,7 @@ class TaskManager:
             await self._update(task_id, status=TaskStatus.DOWNLOADING, progress=2)
             self._start_metrics(task)
             download_revision = task.requested_revision
-            if task.resolved_revision and task.provider in {
-                Provider.HUGGINGFACE,
-                Provider.MODELSCOPE_CN,
-                Provider.MODELSCOPE_AI,
-            }:
+            if task.resolved_revision and task.provider is Provider.HUGGINGFACE:
                 download_revision = task.resolved_revision
             elif (
                 task.resolved_revision
@@ -647,6 +643,7 @@ class TaskManager:
                 proxy_url=self.proxy_url,
                 disable_mirror=task.disable_mirror,
                 disable_proxy=task.disable_proxy,
+                expected_resolved_revision=task.resolved_revision,
             )
             self._raise_if_stopped(task_id)
             if (
@@ -661,6 +658,12 @@ class TaskManager:
             files = inventory(download_root)
             if not files:
                 raise RuntimeError("provider returned no files")
+            downloaded_size = sum(file.size for file in files)
+            if task.total_bytes is not None and downloaded_size != task.total_bytes:
+                raise RuntimeError(
+                    "downloaded content size does not match the validated preflight: "
+                    f"expected {task.total_bytes} bytes, got {downloaded_size}"
+                )
             digest = content_digest(files)
             resolved_revision = result.resolved_revision or f"sha256:{digest}"
             if task.provider is Provider.GITHUB_RELEASE:

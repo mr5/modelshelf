@@ -471,6 +471,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "manifest": manifest.model_dump(mode="json", by_alias=True, exclude_none=True),
         }
 
+    @app.delete(
+        "/api/v1/artifacts/{artifact_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_write)],
+    )
+    async def delete_artifact(artifact_id: str) -> Response:
+        if not await manager.delete_artifact(artifact_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "artifact not found")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     @app.get("/api/v1/providers/{provider}/revisions", dependencies=[Depends(require_write)])
     async def provider_revisions(
         provider: Provider,
@@ -590,6 +600,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if item is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "task not found")
         return item.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    @app.delete(
+        "/api/v1/tasks/{task_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_write)],
+    )
+    async def delete_task(
+        task_id: str,
+        delete_artifact: Annotated[bool, Query(alias="deleteArtifact")] = False,
+    ) -> Response:
+        try:
+            await manager.delete_task(task_id, delete_artifact=delete_artifact)
+        except KeyError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     async def control_task(
         task_id: str, operation: Literal["pause", "resume", "cancel"]

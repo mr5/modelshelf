@@ -38,6 +38,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const reason = detail || response.statusText || "request failed without a response body";
     throw new ApiError(`${method} ${path} returned HTTP ${response.status}: ${reason.slice(0, 4_000)}`, response.status);
   }
+  if (response.status === 204) return undefined as T;
   try {
     return await response.json() as T;
   } catch (cause) {

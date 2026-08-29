@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .catalog_index import CatalogIndex
 from .identity import (
@@ -326,6 +327,37 @@ class Catalog:
             raise
         except (OSError, ValueError):
             return None
+
+    def delete(self, artifact_id: str) -> bool:
+        """Atomically hide an artifact, then remove its files and index entry."""
+        found = self.find(artifact_id)
+        if found is None:
+            return False
+        summary, _manifest = found
+        artifact_root = self.artifacts_root / summary.relative_path
+        tombstone = self.staging_root / f".deleting-{uuid4()}"
+        os.chmod(artifact_root, 0o755)
+        try:
+            os.rename(artifact_root, tombstone)
+        except Exception:
+            os.chmod(artifact_root, 0o555)
+            raise
+        try:
+            self.index.delete(artifact_id)
+        except Exception:
+            os.rename(tombstone, artifact_root)
+            os.chmod(artifact_root, 0o555)
+            raise
+        _unfreeze_tree(tombstone)
+        shutil.rmtree(tombstone)
+        parent = artifact_root.parent
+        while parent != self.artifacts_root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+        return True
 
 
 def verify_artifact(root: Path, *, full: bool, unexpected: bool = False) -> list[str]:

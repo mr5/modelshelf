@@ -167,6 +167,10 @@ class CatalogIndex:
                 self._upsert_sql(), self._values(summary, manifest_mtime_ns, manifest_size)
             )
 
+    def delete(self, artifact_id: str) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM artifacts WHERE artifact_id = ?", (artifact_id,))
+
     def manifest_metadata(self) -> dict[str, tuple[int, int]]:
         with closing(self._connect()) as connection:
             rows = connection.execute(

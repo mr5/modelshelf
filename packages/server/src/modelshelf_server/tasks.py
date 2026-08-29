@@ -159,6 +159,14 @@ class TaskStore:
         self.save(updated)
         return updated
 
+    def delete(self, task_id: str) -> bool:
+        path = self._path(task_id)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
 
 class TaskManager:
     def __init__(
@@ -197,6 +205,7 @@ class TaskManager:
         self._resume_from_stage: set[str] = set()
         self._create_lock = asyncio.Lock()
         self._update_lock = asyncio.Lock()
+        self._artifact_lock = asyncio.Lock()
         self._progress_written: dict[str, float] = {}
         self._download_timing: dict[str, tuple[float, float]] = {}
         self._download_baselines: dict[str, tuple[int, float]] = {}
@@ -301,6 +310,27 @@ class TaskManager:
         return await self._stop_metrics(
             cancelled.id, timing=timing, baseline=baseline, clear_eta=True
         )
+
+    async def delete_task(self, task_id: str, *, delete_artifact: bool = False) -> None:
+        async with self._update_lock:
+            task = self.store.get(task_id)
+            if task is None:
+                raise KeyError(f"unknown task {task_id}")
+            allowed = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+            if task.status not in allowed:
+                raise ValueError("only completed, failed or cancelled tasks can be deleted")
+            if delete_artifact and task.status is not TaskStatus.COMPLETED:
+                raise ValueError("only completed tasks can delete an associated artifact")
+        if delete_artifact and task.artifact_id is not None:
+            async with self._artifact_lock:
+                self.catalog.delete(task.artifact_id)
+        async with self._update_lock:
+            shutil.rmtree(self.catalog.staging_path(task_id), ignore_errors=True)
+            self.store.delete(task_id)
+
+    async def delete_artifact(self, artifact_id: str) -> bool:
+        async with self._artifact_lock:
+            return self.catalog.delete(artifact_id)
 
     def find_duplicate(
         self,
@@ -704,7 +734,8 @@ class TaskManager:
                 resolved_revision=resolved_revision,
             )
             self._raise_if_stopped(task_id)
-            self.catalog.publish(download_root, manifest)
+            async with self._artifact_lock:
+                self.catalog.publish(download_root, manifest)
             shutil.rmtree(stage, ignore_errors=True)
             await self._update(
                 task_id,
@@ -781,7 +812,8 @@ class TaskManager:
             ),
         )
         await self._update(task_id, status=TaskStatus.PUBLISHING, progress=99)
-        self.catalog.publish(publish_root, manifest)
+        async with self._artifact_lock:
+            self.catalog.publish(publish_root, manifest)
         shutil.rmtree(stage, ignore_errors=True)
         return await self._update(
             task_id,

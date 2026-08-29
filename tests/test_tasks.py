@@ -7,9 +7,139 @@ from pathlib import Path
 
 import modelshelf_server.tasks as task_module
 import pytest
-from modelshelf_core import Catalog, FutureSchemaVersionError, Provider, SourceReference
+from modelshelf_core import (
+    Catalog,
+    FutureSchemaVersionError,
+    Provider,
+    SourceReference,
+    TaskStatus,
+)
 from modelshelf_server.providers import Progress, ProviderResult
 from modelshelf_server.tasks import TaskManager
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED],
+)
+def test_delete_task_only_accepts_terminal_states_and_removes_staging(
+    tmp_path: Path, terminal_status: TaskStatus
+) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+    task = manager.store.create(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        resolved_revision="a" * 40,
+        total_bytes=7,
+        disable_mirror=False,
+        disable_proxy=False,
+    )
+    manager.store.update(task.id, {"status": terminal_status})
+    stage = catalog.staging_path(task.id)
+    stage.mkdir()
+    (stage / "partial.bin").write_bytes(b"partial")
+
+    asyncio.run(manager.delete_task(task.id))
+
+    assert manager.store.get(task.id) is None
+    assert not stage.exists()
+
+
+def test_delete_task_rejects_nonterminal_state(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+    task = manager.store.create(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        resolved_revision="a" * 40,
+        total_bytes=7,
+        disable_mirror=False,
+        disable_proxy=False,
+    )
+    manager.store.update(task.id, {"status": TaskStatus.PAUSED})
+
+    with pytest.raises(ValueError, match="only completed, failed or cancelled"):
+        asyncio.run(manager.delete_task(task.id))
+    assert manager.store.get(task.id) is not None
+
+
+def test_delete_completed_task_keeps_its_published_artifact(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    stage = catalog.staging_path("published")
+    stage.mkdir()
+    (stage / "model.bin").write_bytes(b"weights")
+    manifest = catalog.create_manifest(
+        stage,
+        name="model",
+        version="1",
+        source=SourceReference(
+            provider=Provider.HUGGINGFACE,
+            id="owner/model",
+            requested_revision="main",
+            resolved_revision="a" * 40,
+        ),
+    )
+    destination, _ = catalog.publish(stage, manifest)
+    manager = TaskManager(catalog, github_token=None)
+    task = manager.store.create_completed(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        "a" * 40,
+        manifest.artifact_id,
+        manifest.total_size,
+        disable_mirror=False,
+        disable_proxy=False,
+    )
+
+    asyncio.run(manager.delete_task(task.id))
+
+    assert manager.store.get(task.id) is None
+    assert destination.exists()
+    assert catalog.find(manifest.artifact_id) is not None
+
+
+def test_delete_completed_task_can_explicitly_delete_its_artifact(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    stage = catalog.staging_path("published")
+    stage.mkdir()
+    (stage / "model.bin").write_bytes(b"weights")
+    manifest = catalog.create_manifest(
+        stage,
+        name="model",
+        version="1",
+        source=SourceReference(
+            provider=Provider.HUGGINGFACE,
+            id="owner/model",
+            requested_revision="main",
+            resolved_revision="a" * 40,
+        ),
+    )
+    destination, _ = catalog.publish(stage, manifest)
+    manager = TaskManager(catalog, github_token=None)
+    task = manager.store.create_completed(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        "a" * 40,
+        manifest.artifact_id,
+        manifest.total_size,
+        disable_mirror=False,
+        disable_proxy=False,
+    )
+
+    asyncio.run(manager.delete_task(task.id, delete_artifact=True))
+
+    assert manager.store.get(task.id) is None
+    assert not destination.exists()
+    assert catalog.find(manifest.artifact_id) is None
 
 
 def test_create_reuses_task_with_the_same_immutable_identity(tmp_path: Path) -> None:

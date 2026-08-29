@@ -10,7 +10,7 @@ import modelshelf_server.app as app_module
 import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
-from modelshelf_core import Catalog, Provider, SourceReference
+from modelshelf_core import Catalog, Provider, SourceReference, TaskStatus
 from modelshelf_server.app import create_app
 from modelshelf_server.config import Settings
 from modelshelf_server.providers import (
@@ -21,6 +21,81 @@ from modelshelf_server.providers import (
     RevisionDiscovery,
     RevisionOption,
 )
+from modelshelf_server.tasks import TaskStore
+
+
+def test_delete_endpoints_require_write_access_and_remove_owned_data(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    catalog = Catalog(storage)
+    catalog.initialize()
+    artifact_stage = catalog.staging_path("seed-artifact")
+    artifact_stage.mkdir()
+    (artifact_stage / "model.bin").write_bytes(b"weights")
+    manifest = catalog.create_manifest(
+        artifact_stage,
+        name="small-model",
+        version="1",
+        source=SourceReference(
+            provider=Provider.HUGGINGFACE,
+            id="owner/small-model",
+            requested_revision="main",
+            resolved_revision="a" * 40,
+        ),
+    )
+    artifact_path, _ = catalog.publish(artifact_stage, manifest)
+
+    store = TaskStore(catalog.jobs_root)
+    failed = store.create(
+        Provider.HUGGINGFACE,
+        "owner/failed",
+        "main",
+        resolved_revision="b" * 40,
+        total_bytes=7,
+        disable_mirror=False,
+        disable_proxy=False,
+    )
+    store.update(failed.id, {"status": TaskStatus.FAILED})
+    failed_stage = catalog.staging_path(failed.id)
+    failed_stage.mkdir()
+    (failed_stage / "partial.bin").write_bytes(b"partial")
+    paused = store.create(
+        Provider.HUGGINGFACE,
+        "owner/paused",
+        "main",
+        resolved_revision="c" * 40,
+        total_bytes=7,
+        disable_mirror=False,
+        disable_proxy=False,
+    )
+    store.update(paused.id, {"status": TaskStatus.PAUSED})
+
+    settings = Settings(
+        storage_root=storage,
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    headers = {"Authorization": "Bearer write-token"}
+    with TestClient(create_app(settings)) as client:
+        assert client.delete(f"/api/v1/tasks/{failed.id}").status_code == 401
+        assert client.delete(f"/api/v1/artifacts/{manifest.artifact_id}").status_code == 401
+        active_delete = client.delete(f"/api/v1/tasks/{paused.id}", headers=headers)
+        assert active_delete.status_code == 409
+        assert "only completed, failed or cancelled" in active_delete.json()["detail"]
+
+        assert client.delete(f"/api/v1/tasks/{failed.id}", headers=headers).status_code == 204
+        assert store.get(failed.id) is None
+        assert not failed_stage.exists()
+
+        assert (
+            client.delete(f"/api/v1/artifacts/{manifest.artifact_id}", headers=headers).status_code
+            == 204
+        )
+        assert not artifact_path.exists()
+        assert client.get("/api/v1/artifacts").json() == []
+        assert (
+            client.delete(f"/api/v1/artifacts/{manifest.artifact_id}", headers=headers).status_code
+            == 404
+        )
 
 
 class QuietHandler(SimpleHTTPRequestHandler):

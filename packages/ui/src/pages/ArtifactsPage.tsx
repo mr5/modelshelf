@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { siGithub, siHuggingface, siKaggle, siModelscope } from "simple-icons";
 import { api, formatBytes } from "../api.ts";
+import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
 import { sourceModelUrl } from "../source.ts";
 import type { ArtifactSummary, Provider } from "../types.ts";
 
@@ -90,7 +91,7 @@ function modelConfig(item: ArtifactSummary): string {
   ].join("\n");
 }
 
-export function ArtifactsPage() {
+export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
   const [query, setQuery] = useState("");
   const [provider, setProvider] = useState<Provider | "">("");
   const [sort, setSort] = useState<SortOption>("created:desc");
@@ -99,6 +100,7 @@ export function ArtifactsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState<{ artifactId: string; kind: "command" | "config" }>();
+  const [deletingArtifactId, setDeletingArtifactId] = useState<string>();
   useEffect(() => {
     let active = true;
     const timer = window.setTimeout(() => {
@@ -148,6 +150,21 @@ export function ArtifactsPage() {
     }
   }
 
+  async function deleteArtifact(item: ArtifactSummary): Promise<boolean> {
+    setDeletingArtifactId(item.artifactId);
+    setError("");
+    try {
+      await api<void>(`/artifacts/${encodeURIComponent(item.artifactId)}`, { method: "DELETE" });
+      setItems((current) => current.filter((candidate) => candidate.artifactId !== item.artifactId));
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      setDeletingArtifactId(undefined);
+    }
+  }
+
   return <div className="page">
     <div className="page-head"><div><p className="eyebrow">Immutable storage</p><h1>Artifacts</h1><p className="muted">Only fully verified artifacts atomically added to this shelf appear here.</p></div></div>
     <div className="artifact-filters">
@@ -172,7 +189,15 @@ export function ArtifactsPage() {
       const commandCopied = copied?.artifactId === item.artifactId && copied.kind === "command";
       const configCopied = copied?.artifactId === item.artifactId && copied.kind === "config";
       return <article className="artifact-card" key={item.artifactId}>
-        <div className="artifact-title-row"><h2>{item.name}</h2><span className="immutable-badge"><span aria-hidden="true">◆</span> Immutable</span></div>
+        <div className="artifact-title-row"><h2>{item.name}</h2><div className="artifact-title-controls"><span className="immutable-badge"><span aria-hidden="true">◆</span> Immutable</span>{canManage && <details className="artifact-overflow"><summary aria-label={`More actions for ${item.name}`}>•••</summary><div className="artifact-menu" role="menu"><DeleteConfirm
+          triggerLabel="Delete artifact"
+          triggerClassName="danger-text artifact-delete-menu-item"
+          title={`Delete ${item.name}?`}
+          description={`Its manifest and all ${item.fileCount.toLocaleString()} files (${formatBytes(item.totalSize)}) will be permanently removed from the shelf.`}
+          confirmLabel="Delete artifact"
+          disabled={deletingArtifactId === item.artifactId}
+          onConfirm={() => deleteArtifact(item)}
+        /></div></details>}</div></div>
         {sourceUrl
           ? <a className="artifact-source" href={sourceUrl} target="_blank" rel="noreferrer">{item.sourceId} <span aria-hidden="true">↗</span></a>
           : <span className="artifact-source">{item.sourceId}</span>}

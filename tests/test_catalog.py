@@ -272,3 +272,18 @@ def test_publish_remains_successful_when_index_update_fails(
     rebuilt = Catalog(tmp_path)
     rebuilt.initialize()
     assert rebuilt.find(manifest.artifact_id) is not None
+
+
+def test_delete_removes_artifact_files_and_index_entry(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.initialize()
+    stage = make_stage(catalog, "delete")
+    manifest = catalog.create_manifest(stage, name="model", version="1", source=source())
+    destination, _ = catalog.publish(stage, manifest)
+
+    assert catalog.delete(manifest.artifact_id)
+
+    assert not destination.exists()
+    assert catalog.find(manifest.artifact_id) is None
+    assert catalog.list() == []
+    assert not catalog.delete(manifest.artifact_id)

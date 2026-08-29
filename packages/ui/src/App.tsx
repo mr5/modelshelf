@@ -61,7 +61,7 @@ function Protected({ authenticated }: { authenticated: boolean }) {
 function ArtifactAccess({ authenticated, publicArtifacts }: { authenticated: boolean; publicArtifacts: boolean }) {
   const location = useLocation();
   return authenticated || publicArtifacts
-    ? <ArtifactsPage />
+    ? <ArtifactsPage canManage={authenticated} />
     : <Navigate to="/login" state={{ from: location }} replace />;
 }
 

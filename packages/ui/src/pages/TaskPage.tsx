@@ -1,10 +1,11 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, formatBytes, formatDuration, formatRate } from "../api.ts";
+import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
 import { sourceModelUrl } from "../source.ts";
 import type { DownloadTask } from "../types.ts";
 
-export function TaskPage({ taskId }: { taskId: string }) {
+export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (taskId: string) => void }) {
   const navigate = useNavigate();
   const [task, setTask] = useState<DownloadTask | null>(null);
   const [error, setError] = useState("");
@@ -61,6 +62,24 @@ export function TaskPage({ taskId }: { taskId: string }) {
     }
   }
 
+  async function deleteTask(deleteArtifact: boolean): Promise<boolean> {
+    if (!task) return false;
+    setActionBusy(true);
+    setError("");
+    try {
+      const query = deleteArtifact ? "?deleteArtifact=true" : "";
+      await api<void>(`/tasks/${taskId}${query}`, { method: "DELETE" });
+      onDeleted?.(taskId);
+      navigate("/tasks", { replace: true });
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   if (error && !task) {
     return <ModalFrame title="Task unavailable" onClose={close}><div className="error-box">{error}</div></ModalFrame>;
   }
@@ -70,6 +89,7 @@ export function TaskPage({ taskId }: { taskId: string }) {
 
   const canPause = task.status === "queued" || task.status === "resolving" || task.status === "downloading";
   const canCancel = canPause || task.status === "paused" || task.status === "awaiting_confirmation";
+  const canDelete = task.status === "completed" || task.status === "failed" || task.status === "cancelled";
   const eta = task.status === "paused"
     ? "Paused"
     : task.status === "completed" || task.status === "awaiting_confirmation"
@@ -96,10 +116,24 @@ export function TaskPage({ taskId }: { taskId: string }) {
     eyebrow={task.provider}
     status={task.status}
     onClose={close}
-    footer={canCancel && <>
+    footer={(canCancel || canDelete) && <>
       {canPause && <button className="ghost" disabled={actionBusy} onClick={() => void control("pause")}>Pause</button>}
       {task.status === "paused" && <button disabled={actionBusy} onClick={() => void control("resume")}>Resume</button>}
-      <button className="danger" disabled={actionBusy} onClick={() => void control("cancel")}>Cancel task</button>
+      {canCancel && <button className="danger" disabled={actionBusy} onClick={() => void control("cancel")}>Cancel task</button>}
+      {canDelete && <DeleteConfirm
+        triggerLabel="Delete task"
+        triggerClassName="danger"
+        title={`Delete ${task.status} task?`}
+        description={task.status === "completed"
+          ? (deleteArtifact) => deleteArtifact
+            ? "The task record, retained staging data, published artifact manifest and all model files will be permanently removed."
+            : "The task record and any retained staging data will be removed. Its published artifact and model files will remain on the shelf."
+          : "The task record and any downloaded staging data will be permanently removed."}
+        optionLabel={task.status === "completed" ? "Also delete the published artifact and model files" : undefined}
+        confirmLabel="Delete task"
+        disabled={actionBusy}
+        onConfirm={deleteTask}
+      />}
     </>}
   >
     <section className="task-progress-card">

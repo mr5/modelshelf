@@ -21,6 +21,8 @@ models:
     provider: huggingface
     id: owner/model
     revision: main
+    files:
+      - model-Q4_K_M.gguf
   - provider: modelscope-cn
     id: owner/second
     path: custom/second
@@ -59,6 +61,9 @@ models:
 	if reloaded.Models[0].Alias != "mini-lm" {
 		t.Fatalf("alias did not round trip: %#v", reloaded.Models[0])
 	}
+	if len(reloaded.Models[0].Files) != 1 || reloaded.Models[0].Files[0] != "model-Q4_K_M.gguf" {
+		t.Fatalf("selected files did not round trip: %#v", reloaded.Models[0])
+	}
 	if reloaded.SchemaVersion != CurrentSchemaVersion {
 		t.Fatalf("schema version = %d", reloaded.SchemaVersion)
 	}
@@ -67,7 +72,7 @@ models:
 func TestLoadRejectsFutureConfigAndLocalLayoutSchemas(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yml")
-	input := `schemaVersion: 2
+	input := `schemaVersion: 3
 serverUrl: http://modelshelf.test:8080
 nfsLocalPath: /mnt/modelshelf
 localBasePath: ` + filepath.Join(root, "local") + `
@@ -111,6 +116,43 @@ func TestValidateRejectsInvalidProvider(t *testing.T) {
 	configuration.Models = append(configuration.Models, model("invalid", "one"))
 	if err := configuration.Validate(); err == nil {
 		t.Fatal("invalid provider was accepted")
+	}
+}
+
+func TestValidateRejectsArbitraryOrIncompleteSelectedFiles(t *testing.T) {
+	tests := [][]string{
+		{"config.json"},
+		{"model-a.gguf", "model-b.gguf"},
+		{"model-00001-of-00003.gguf", "model-00003-of-00003.gguf"},
+		{"model.gguf", "mmproj-model.gguf"},
+	}
+	for _, files := range tests {
+		configuration, err := Defaults()
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected := model(domain.ProviderHuggingFace, "owner/model")
+		selected.Files = files
+		configuration.Models = append(configuration.Models, selected)
+		if err := configuration.Validate(); err == nil {
+			t.Fatalf("invalid selected files were accepted: %#v", files)
+		}
+	}
+}
+
+func TestValidateAcceptsCompleteSplitGGUFVariant(t *testing.T) {
+	configuration, err := Defaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := model(domain.ProviderHuggingFace, "owner/model")
+	selected.Files = []string{
+		"Q4/model-00002-of-00002.gguf",
+		"Q4/model-00001-of-00002.gguf",
+	}
+	configuration.Models = append(configuration.Models, selected)
+	if err := configuration.Validate(); err != nil {
+		t.Fatalf("complete split GGUF variant rejected: %v", err)
 	}
 }
 

@@ -71,7 +71,7 @@ def load_manifest_json(raw: str) -> ArtifactManifest:
         _json_object(raw, "artifact manifest"),
         document_name="artifact manifest",
         current_version=MANIFEST_SCHEMA_VERSION,
-        migrations={},
+        migrations={1: _manifest_v1_to_v2},
     )
     return ArtifactManifest.model_validate(document)
 
@@ -89,12 +89,26 @@ def _task_v1_to_v2(document: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _task_v2_to_v3(document: dict[str, Any]) -> dict[str, Any]:
+    result = dict(document)
+    result.setdefault("selectedPaths", None)
+    return result
+
+
+def _manifest_v1_to_v2(document: dict[str, Any]) -> dict[str, Any]:
+    result = dict(document)
+    source = dict(result.get("source") or {})
+    source.setdefault("selectedPaths", None)
+    result["source"] = source
+    return result
+
+
 def load_task_json(raw: str) -> tuple[DownloadTask, bool]:
     document, migrated = _migrate_document(
         _json_object(raw, "download task"),
         document_name="download task",
         current_version=TASK_SCHEMA_VERSION,
-        migrations={0: _task_v0_to_v1, 1: _task_v1_to_v2},
+        migrations={0: _task_v0_to_v1, 1: _task_v1_to_v2, 2: _task_v2_to_v3},
         missing_version=0,
     )
     return DownloadTask.model_validate(document), migrated

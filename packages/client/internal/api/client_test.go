@@ -35,12 +35,16 @@ func TestArtifactsAndCreateTask(t *testing.T) {
   "totalSize":7,"fileCount":1,"createdAt":"2026-01-01T00:00:00Z","relativePath":"path"
 }]`))
 		case request.Method == http.MethodPost && request.URL.Path == "/api/v1/tasks":
-			var payload map[string]string
+			var payload map[string]any
 			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 				t.Error(err)
 			}
 			if payload["revision"] != "main" || payload["provider"] != "huggingface" {
 				t.Errorf("payload = %#v", payload)
+			}
+			files, ok := payload["selectedPaths"].([]any)
+			if !ok || len(files) != 1 || files[0] != "model.gguf" {
+				t.Errorf("selectedPaths = %#v", payload["selectedPaths"])
 			}
 			writer.Header().Set("Content-Type", "application/json")
 			writer.WriteHeader(http.StatusAccepted)
@@ -67,7 +71,9 @@ func TestArtifactsAndCreateTask(t *testing.T) {
 	if len(artifacts) != 1 || artifacts[0].ResolvedRevision != "abc" {
 		t.Fatalf("artifacts = %#v", artifacts)
 	}
-	task, err := client.CreateTask(context.Background(), "huggingface", "owner/model", "main")
+	task, err := client.CreateTask(
+		context.Background(), "huggingface", "owner/model", "main", []string{"model.gguf"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

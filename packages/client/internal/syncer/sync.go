@@ -48,6 +48,9 @@ func SelectArtifact(
 			artifact.ResolvedRevision != desired.RequestedRevision {
 			continue
 		}
+		if artifact.SelectionDigest != domain.SelectionDigest(desired.Files) {
+			continue
+		}
 		if selected == nil || artifact.CreatedAt.After(selected.CreatedAt) {
 			selected = artifact
 		}

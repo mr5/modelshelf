@@ -22,6 +22,7 @@ type Model struct {
 	ID               string    `yaml:"id"`
 	Revision         string    `yaml:"revision"`
 	Path             string    `yaml:"path,omitempty"`
+	Files            []string  `yaml:"files,omitempty"`
 	ResolvedRevision string    `yaml:"resolvedRevision"`
 	ArtifactID       string    `yaml:"artifactId"`
 	RelativePath     string    `yaml:"relativePath"`
@@ -34,7 +35,7 @@ type File struct {
 	needsMigration bool
 }
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 type UnsupportedSchemaVersionError struct {
 	Version int
@@ -93,6 +94,10 @@ func Load(path string) (File, bool, error) {
 	}
 	if result.SchemaVersion == 0 {
 		// Pre-release generated lock files had the v1 shape without a marker.
+		result.SchemaVersion = 1
+		result.needsMigration = true
+	}
+	if result.SchemaVersion == 1 {
 		result.SchemaVersion = CurrentSchemaVersion
 		result.needsMigration = true
 	}
@@ -112,12 +117,13 @@ func Validate(file File) error {
 	seen := map[string]struct{}{}
 	seenAliases := map[string]struct{}{}
 	for index, model := range file.Models {
+		model.Files = domain.CanonicalFiles(model.Files)
 		if !domain.ValidProvider(model.Provider) || model.ID == "" || model.Revision == "" ||
 			model.ResolvedRevision == "" || model.ArtifactID == "" || model.RelativePath == "" ||
 			model.LockedAt.IsZero() {
 			return fmt.Errorf("models[%d] is incomplete", index)
 		}
-		key := DeclarationKey(model.Alias, model.Provider, model.ID, model.Revision)
+		key := DeclarationKey(model.Alias, model.Provider, model.ID, model.Revision, model.Files)
 		if _, ok := seen[key]; ok {
 			return fmt.Errorf("duplicate declaration %s", key)
 		}
@@ -179,26 +185,34 @@ func Save(file File, path string) error {
 	return directory.Sync()
 }
 
-func SelectorKey(provider, id, revision string) string {
-	return provider + "\x00" + id + "\x00" + revision
+func SelectorKey(provider, id, revision string, files ...[]string) string {
+	var selected []string
+	if len(files) > 0 {
+		selected = files[0]
+	}
+	return provider + "\x00" + id + "\x00" + revision + "\x00" + domain.FilesKey(selected)
 }
 
-func DeclarationKey(alias, provider, id, revision string) string {
+func DeclarationKey(alias, provider, id, revision string, files ...[]string) string {
 	if alias != "" {
 		return "alias\x00" + alias
 	}
-	return "selector\x00" + SelectorKey(provider, id, revision)
+	return "selector\x00" + SelectorKey(provider, id, revision, files...)
 }
 
 func DesiredKey(desired domain.DesiredModel) string {
-	return DeclarationKey(desired.Alias, desired.Provider, desired.ID, desired.RequestedRevision)
+	return DeclarationKey(
+		desired.Alias, desired.Provider, desired.ID, desired.RequestedRevision, desired.Files,
+	)
 }
 
 func Find(file File, desired domain.DesiredModel) *Model {
 	key := DesiredKey(desired)
 	for index := range file.Models {
 		candidate := &file.Models[index]
-		if DeclarationKey(candidate.Alias, candidate.Provider, candidate.ID, candidate.Revision) == key {
+		if DeclarationKey(
+			candidate.Alias, candidate.Provider, candidate.ID, candidate.Revision, candidate.Files,
+		) == key {
 			return candidate
 		}
 	}
@@ -216,9 +230,11 @@ func Equal(left, right File) bool {
 func Sort(file *File) {
 	sort.Slice(file.Models, func(left, right int) bool {
 		return DeclarationKey(
-			file.Models[left].Alias, file.Models[left].Provider, file.Models[left].ID, file.Models[left].Revision,
+			file.Models[left].Alias, file.Models[left].Provider, file.Models[left].ID,
+			file.Models[left].Revision, file.Models[left].Files,
 		) < DeclarationKey(
-			file.Models[right].Alias, file.Models[right].Provider, file.Models[right].ID, file.Models[right].Revision,
+			file.Models[right].Alias, file.Models[right].Provider, file.Models[right].ID,
+			file.Models[right].Revision, file.Models[right].Files,
 		)
 	})
 }

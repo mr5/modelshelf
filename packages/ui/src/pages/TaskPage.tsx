@@ -179,6 +179,11 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       <Detail label="Network route" value={route} />
     </section>
 
+    {task.selectedPaths && <details className="task-selected-files">
+      <summary>GGUF variant files <span>{task.selectedPaths.length.toLocaleString()}</span></summary>
+      <div>{task.selectedPaths.map((path) => <code key={path}>{path}</code>)}</div>
+    </details>}
+
     {task.error && <div className="error-box">{task.error}</div>}
     {error && <div className="error-box">{error}</div>}
     {task.artifactId && <div className="task-published"><span>Published artifact</span><code>{task.artifactId}</code></div>}

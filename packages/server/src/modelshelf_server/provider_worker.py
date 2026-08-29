@@ -42,7 +42,11 @@ async def _main(payload: dict[str, Any]) -> None:
             payload["revision"],
             **common,
         )
-        _emit({"type": "result", "estimate": estimate.as_dict()})
+        estimate_record = estimate.as_dict()
+        # The parent process needs the complete immutable file inventory to classify safe GGUF
+        # variants. This internal worker record is not returned directly by the HTTP API.
+        estimate_record["files"] = [file.as_dict() for file in estimate.files]
+        _emit({"type": "result", "estimate": estimate_record})
         return
 
     async def progress(downloaded: int, total: int | None) -> None:
@@ -55,6 +59,7 @@ async def _main(payload: dict[str, Any]) -> None:
         Path(payload["destination"]),
         progress,
         expected_resolved_revision=payload.get("expectedResolvedRevision"),
+        selected_paths=payload.get("selectedPaths"),
         **common,
     )
     _emit(

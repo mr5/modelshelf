@@ -69,7 +69,7 @@ def test_future_manifest_and_storage_layout_versions_are_rejected(tmp_path: Path
     catalog.create_manifest(stage, name="model", version="1", source=source())
     manifest_path = stage / ".modelshelf" / "manifest.json"
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
-    document["schemaVersion"] = 2
+    document["schemaVersion"] = 3
     manifest_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
         catalog.read_manifest(stage)
@@ -105,6 +105,36 @@ def test_artifact_paths_keep_source_names_readable_and_escape_only_unsafe_charac
         "https://models.example/model.gguf?version=1",
         "sha256:abc",
     )
+
+
+def test_selected_file_artifacts_have_distinct_stable_identities(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.initialize()
+    selected = ["nested/model.gguf", "README.md"]
+    stage = make_stage(catalog, "selected")
+    (stage / "README.md").write_text("model", encoding="utf-8")
+    manifest = catalog.create_manifest(
+        stage,
+        name="model",
+        version="abc123",
+        source=SourceReference(
+            provider=Provider.HUGGINGFACE,
+            id="owner/model",
+            requested_revision="main",
+            resolved_revision="abc123",
+            selected_paths=selected,
+        ),
+    )
+
+    destination, _ = catalog.publish(stage, manifest)
+    [summary] = catalog.list()
+
+    assert summary.selected_paths == sorted(selected)
+    assert summary.selection_digest is not None
+    assert summary.artifact_id != artifact_identity(Provider.HUGGINGFACE, "owner/model", "abc123")
+    assert destination.name == f"abc123~files-{summary.selection_digest}"
+    assert artifact_identity_from_relative_path(summary.relative_path) == summary.artifact_id
+    assert catalog.find(summary.artifact_id) == (summary, manifest)
 
 
 def test_publish_deduplicates_and_rejects_collision(tmp_path: Path) -> None:
@@ -193,7 +223,7 @@ def test_unversioned_nonempty_index_is_preserved_and_rebuilt(tmp_path: Path) -> 
         connection.execute("CREATE TABLE artifacts (artifact_id TEXT PRIMARY KEY)")
     catalog.initialize()
     with sqlite3.connect(catalog.index_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         columns = {row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()}
     assert "manifest_mtime_ns" in columns
     assert list(catalog.index_path.parent.glob("catalog.sqlite3.invalid-*"))

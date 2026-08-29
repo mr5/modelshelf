@@ -23,6 +23,7 @@ from modelshelf_server.providers import (
     ProviderResult,
     RevisionDiscovery,
     RevisionOption,
+    SourceFile,
 )
 from modelshelf_server.tasks import TaskStore
 
@@ -307,6 +308,10 @@ def test_provider_search_and_revision_discovery_are_authenticated_and_cached(
             2,
             "https://hub.example/owner/model",
             (EstimateMetadata("Library", "transformers"),),
+            (
+                SourceFile("config.json", 120),
+                SourceFile("model-Q4_K_M.gguf", 2_000),
+            ),
         )
 
     monkeypatch.setattr(app_module, "search_models", fake_models)
@@ -348,6 +353,51 @@ def test_provider_search_and_revision_discovery_are_authenticated_and_cached(
             assert estimate.json()["totalSize"] == 2_120
             assert estimate.json()["hubUrl"] == "https://hub.example/owner/model"
             assert estimate.json()["metadata"] == [{"label": "Library", "value": "transformers"}]
+            assert estimate.json()["ggufVariantSelectionAvailable"] is True
+            assert estimate.json()["ggufVariants"] == [
+                {
+                    "label": "model-Q4_K_M.gguf",
+                    "paths": ["model-Q4_K_M.gguf"],
+                    "fileCount": 1,
+                    "totalSize": 2_000,
+                }
+            ]
+            selected = client.get(
+                "/api/v1/providers/huggingface/estimate",
+                params={
+                    "id": "owner/model",
+                    "revision": "main",
+                    "selectedPath": "model-Q4_K_M.gguf",
+                },
+                headers=headers,
+            )
+            assert selected.status_code == 200
+            assert selected.json()["selectedPaths"] == ["model-Q4_K_M.gguf"]
+            assert selected.json()["totalSize"] == 2_000
+            assert selected.json()["fileCount"] == 1
+            rejected = client.get(
+                "/api/v1/providers/huggingface/estimate",
+                params={
+                    "id": "owner/model",
+                    "revision": "main",
+                    "selectedPath": "config.json",
+                },
+                headers=headers,
+            )
+            assert rejected.status_code == 422
+            assert "recognized GGUF variant" in rejected.json()["detail"]
+            rejected_task = client.post(
+                "/api/v1/tasks",
+                json={
+                    "provider": "huggingface",
+                    "id": "owner/model",
+                    "revision": "main",
+                    "selectedPaths": ["config.json"],
+                },
+                headers=headers,
+            )
+            assert rejected_task.status_code == 422
+            assert "recognized GGUF variant" in rejected_task.json()["detail"]
     assert calls == {"models": 1, "revisions": 1, "estimates": 1}
 
 

@@ -48,8 +48,8 @@ def distribution_metadata(root: Path | None) -> dict[str, object]:
         filename = archive_filename(os_name, architecture)
         if (resolved / filename).is_file():
             platforms.append({"os": os_name, "arch": architecture, "filename": filename})
-    available = installer.is_file() and checksums.is_file() and len(platforms) == len(
-        CLIENT_PLATFORMS
+    available = (
+        installer.is_file() and checksums.is_file() and len(platforms) == len(CLIENT_PLATFORMS)
     )
     result: dict[str, object] = {"available": available, "platforms": platforms}
     version_path = resolved / "version.txt"

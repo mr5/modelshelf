@@ -164,7 +164,7 @@ The default configuration path is `~/.config/modelshelf/config.yml` (override wi
 `MODELSHELF_CONFIG`):
 
 ```yaml
-schemaVersion: 1
+schemaVersion: 2
 serverUrl: http://modelshelf.internal:8080
 nfsLocalPath: /mnt/modelshelf
 localBasePath: /var/lib/modelshelf
@@ -180,6 +180,11 @@ models:
     revision: master
     path: runtime/qwen-2.5-7b
 ```
+
+Optional `files` entries are reserved for a complete GGUF variant recognized by the server. Split
+variants must list every shard; other repository types are downloaded in full. Auxiliary GGUFs such
+as multimodal projectors are not inferred as part of a variant, so use the full repository when they
+are required.
 
 `sync` writes immutable resolutions to `config.lock.yml` without modifying the desired-state
 config. Normal sync preserves the lock; `sync --update` refreshes moving revisions;

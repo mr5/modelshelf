@@ -1,6 +1,12 @@
 package domain
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
+	"strings"
+	"time"
+)
 
 const (
 	ProviderHuggingFace   = "huggingface"
@@ -28,14 +34,15 @@ func ValidProvider(provider string) bool {
 }
 
 type DesiredModel struct {
-	Alias             string `yaml:"alias,omitempty" json:"alias,omitempty"`
-	Provider          string `yaml:"provider" json:"provider"`
-	ID                string `yaml:"id" json:"id"`
-	RequestedRevision string `yaml:"revision,omitempty" json:"requestedRevision"`
-	ResolvedRevision  string `yaml:"-" json:"-"`
-	ArtifactID        string `yaml:"-" json:"-"`
-	RelativePath      string `yaml:"-" json:"-"`
-	Path              string `yaml:"path,omitempty" json:"path,omitempty"`
+	Alias             string   `yaml:"alias,omitempty" json:"alias,omitempty"`
+	Provider          string   `yaml:"provider" json:"provider"`
+	ID                string   `yaml:"id" json:"id"`
+	RequestedRevision string   `yaml:"revision,omitempty" json:"requestedRevision"`
+	ResolvedRevision  string   `yaml:"-" json:"-"`
+	ArtifactID        string   `yaml:"-" json:"-"`
+	RelativePath      string   `yaml:"-" json:"-"`
+	Path              string   `yaml:"path,omitempty" json:"path,omitempty"`
+	Files             []string `yaml:"files,omitempty" json:"files,omitempty"`
 }
 
 type ArtifactSummary struct {
@@ -50,6 +57,8 @@ type ArtifactSummary struct {
 	FileCount         int       `json:"fileCount"`
 	CreatedAt         time.Time `json:"createdAt"`
 	RelativePath      string    `json:"relativePath"`
+	SelectionDigest   string    `json:"selectionDigest,omitempty"`
+	SelectedPaths     []string  `json:"selectedPaths,omitempty"`
 }
 
 type DownloadTask struct {
@@ -66,6 +75,7 @@ type DownloadTask struct {
 	UpdatedAt         time.Time `json:"updatedAt"`
 	Error             string    `json:"error,omitempty"`
 	ArtifactID        string    `json:"artifactId,omitempty"`
+	SelectedPaths     []string  `json:"selectedPaths,omitempty"`
 }
 
 type NFSInfo struct {
@@ -103,11 +113,12 @@ type FileEntry struct {
 }
 
 type SourceReference struct {
-	Provider          string `json:"provider"`
-	ID                string `json:"id"`
-	RequestedRevision string `json:"requestedRevision"`
-	ResolvedRevision  string `json:"resolvedRevision"`
-	URL               string `json:"url,omitempty"`
+	Provider          string   `json:"provider"`
+	ID                string   `json:"id"`
+	RequestedRevision string   `json:"requestedRevision"`
+	ResolvedRevision  string   `json:"resolvedRevision"`
+	URL               string   `json:"url,omitempty"`
+	SelectedPaths     []string `json:"selectedPaths,omitempty"`
 }
 
 type ArtifactManifest struct {
@@ -122,4 +133,36 @@ type ArtifactManifest struct {
 	TotalSize     int64           `json:"totalSize"`
 	FileCount     int             `json:"fileCount"`
 	Files         []FileEntry     `json:"files"`
+}
+
+func CanonicalFiles(files []string) []string {
+	if files == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		seen[file] = struct{}{}
+	}
+	result := make([]string, 0, len(seen))
+	for file := range seen {
+		result = append(result, file)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func SelectionDigest(files []string) string {
+	if files == nil {
+		return ""
+	}
+	digest := sha256.New()
+	for _, file := range CanonicalFiles(files) {
+		_, _ = digest.Write([]byte(file))
+		_, _ = digest.Write([]byte{0})
+	}
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
+func FilesKey(files []string) string {
+	return strings.Join(CanonicalFiles(files), "\x00")
 }

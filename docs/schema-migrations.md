@@ -39,3 +39,14 @@ only a pre-release bootstrap rule; after the first release, every schema change 
 The catalog SQLite schema also starts publicly at `user_version = 1`. Any pre-release database with
 a different version, a corrupt database, or an unversioned non-empty schema is preserved and rebuilt
 from manifests.
+
+## GGUF variant schemas
+
+GGUF variant downloads add exact `selectedPaths` to artifact manifests and durable jobs. New manifests
+use schema 2; v1 manifests are normalized in memory and remain immutable on disk. Jobs migrate from
+v2 to v3 with selection left unset. The disposable catalog index moves to `user_version = 2` and
+is rebuilt from manifests.
+
+Client config and lock files move from schema 1 to schema 2 with optional GGUF variant `files`. Config is
+normalized only in memory until the user performs a write. Generated v1 locks migrate losslessly;
+frozen mode still refuses any required lock rewrite.

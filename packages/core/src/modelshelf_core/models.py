@@ -8,9 +8,9 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-MANIFEST_SCHEMA_VERSION = 1
-TASK_SCHEMA_VERSION = 2
-STORAGE_LAYOUT_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION: Literal[2] = 2
+TASK_SCHEMA_VERSION: Literal[3] = 3
+STORAGE_LAYOUT_SCHEMA_VERSION: Literal[1] = 1
 
 
 def to_camel(value: str) -> str:
@@ -66,10 +66,23 @@ class SourceReference(Model):
     requested_revision: str = Field(min_length=1)
     resolved_revision: str = Field(min_length=1)
     url: str | None = None
+    selected_paths: list[str] | None = None
+
+    @field_validator("selected_paths")
+    @classmethod
+    def valid_selected_paths(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        normalized = sorted(set(value))
+        if not normalized:
+            raise ValueError("selected paths cannot be empty")
+        for path in normalized:
+            FileEntry.relative_safe_path(path)
+        return normalized
 
 
 class ArtifactManifest(Model):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     artifact_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     version: str = Field(min_length=1)
@@ -80,6 +93,14 @@ class ArtifactManifest(Model):
     total_size: int = Field(ge=0)
     file_count: int = Field(ge=0)
     files: list[FileEntry]
+
+    @model_validator(mode="after")
+    def selected_paths_match_files(self) -> ArtifactManifest:
+        if self.source.selected_paths is not None:
+            actual = sorted(file.path for file in self.files)
+            if self.source.selected_paths != actual:
+                raise ValueError("source selected paths must exactly match manifest files")
+        return self
 
 
 class StorageLayout(Model):
@@ -99,6 +120,13 @@ class ArtifactSummary(Model):
     file_count: int
     created_at: datetime
     relative_path: str
+    selection_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    selected_paths: list[str] | None = None
+
+    @field_validator("selected_paths")
+    @classmethod
+    def valid_summary_selected_paths(cls, value: list[str] | None) -> list[str] | None:
+        return SourceReference.valid_selected_paths(value)
 
 
 class InferredMetadata(Model):
@@ -111,7 +139,7 @@ class InferredMetadata(Model):
 
 
 class DownloadTask(Model):
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     id: str
     provider: Provider
     source_id: str
@@ -121,6 +149,7 @@ class DownloadTask(Model):
     disable_proxy: bool = False
     scheduled_at: datetime | None = None
     resume_from_stage: bool = False
+    selected_paths: list[str] | None = None
     resolved_revision: str | None = None
     status: TaskStatus
     progress: int = Field(ge=0, le=100)
@@ -157,6 +186,18 @@ class DownloadTask(Model):
             raise ValueError("scheduled start must include a timezone")
         return value.astimezone(UTC)
 
+    @field_validator("selected_paths")
+    @classmethod
+    def valid_selected_paths(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        normalized = sorted(set(value))
+        if not normalized:
+            raise ValueError("selected paths cannot be empty")
+        for path in normalized:
+            FileEntry.relative_safe_path(path)
+        return normalized
+
     @model_validator(mode="after")
     def valid_mirror_route(self) -> DownloadTask:
         supported = {Provider.HUGGINGFACE, Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}
@@ -166,6 +207,9 @@ class DownloadTask(Model):
             raise ValueError("temporary mirror and mirror bypass cannot be enabled together")
         if self.status is TaskStatus.SCHEDULED and self.scheduled_at is None:
             raise ValueError("scheduled task must include a start time")
+        selectable = {Provider.HUGGINGFACE, Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}
+        if self.selected_paths and self.provider not in selectable:
+            raise ValueError("file selection is not supported for this source")
         return self
 
 

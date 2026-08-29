@@ -14,6 +14,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from modelshelf_core import (
+    TASK_SCHEMA_VERSION,
     Catalog,
     DownloadTask,
     Provider,
@@ -70,6 +71,7 @@ class TaskStore:
         disable_proxy: bool,
         mirror_url: str | None = None,
         scheduled_at: datetime | None = None,
+        selected_paths: list[str] | None = None,
     ) -> DownloadTask:
         now = datetime.now(UTC)
         if scheduled_at is not None:
@@ -82,7 +84,7 @@ class TaskStore:
             else TaskStatus.QUEUED
         )
         task = DownloadTask(
-            schema_version=2,
+            schema_version=TASK_SCHEMA_VERSION,
             id=str(uuid4()),
             provider=provider,
             source_id=source_id,
@@ -92,6 +94,7 @@ class TaskStore:
             mirror_url=mirror_url,
             disable_proxy=disable_proxy,
             scheduled_at=scheduled_at,
+            selected_paths=selected_paths,
             status=initial_status,
             progress=0,
             total_bytes=total_bytes,
@@ -113,10 +116,11 @@ class TaskStore:
         disable_mirror: bool,
         disable_proxy: bool,
         mirror_url: str | None = None,
+        selected_paths: list[str] | None = None,
     ) -> DownloadTask:
         now = datetime.now(UTC)
         task = DownloadTask(
-            schema_version=2,
+            schema_version=TASK_SCHEMA_VERSION,
             id=str(uuid4()),
             provider=provider,
             source_id=source_id,
@@ -125,6 +129,7 @@ class TaskStore:
             disable_mirror=disable_mirror,
             mirror_url=mirror_url,
             disable_proxy=disable_proxy,
+            selected_paths=selected_paths,
             status=TaskStatus.COMPLETED,
             progress=100,
             bytes_downloaded=total_bytes,
@@ -344,9 +349,7 @@ class TaskManager:
         self._scheduler_wakeup.set()
         return await self._stop_metrics(paused.id, timing=timing, baseline=baseline)
 
-    async def resume(
-        self, task_id: str, *, scheduled_at: datetime | None = None
-    ) -> DownloadTask:
+    async def resume(self, task_id: str, *, scheduled_at: datetime | None = None) -> DownloadTask:
         if scheduled_at is not None:
             if scheduled_at.tzinfo is None or scheduled_at.utcoffset() is None:
                 raise ValueError("scheduled resume must include a timezone")
@@ -436,12 +439,13 @@ class TaskManager:
         disable_mirror: bool = False,
         mirror_url: str | None = None,
         disable_proxy: bool = False,
+        selected_paths: list[str] | None = None,
     ) -> DuplicateIngestion | None:
         if not resolved_revision:
             return None
 
         tasks = self.store.list()
-        artifact_id = artifact_identity(provider, source_id, resolved_revision)
+        artifact_id = artifact_identity(provider, source_id, resolved_revision, selected_paths)
         existing_artifact = self.catalog.find(artifact_id)
         if existing_artifact is not None:
             completed = next(
@@ -481,6 +485,7 @@ class TaskManager:
                 and task.disable_mirror == disable_mirror
                 and task.mirror_url == mirror_url
                 and task.disable_proxy == disable_proxy
+                and task.selected_paths == selected_paths
             ),
             None,
         )
@@ -500,6 +505,7 @@ class TaskManager:
         mirror_url: str | None = None,
         disable_proxy: bool = False,
         scheduled_at: datetime | None = None,
+        selected_paths: list[str] | None = None,
     ) -> TaskCreationResult:
         async with self._create_lock:
             duplicate = self.find_duplicate(
@@ -510,6 +516,7 @@ class TaskManager:
                 disable_mirror=disable_mirror,
                 mirror_url=mirror_url,
                 disable_proxy=disable_proxy,
+                selected_paths=selected_paths,
             )
             if duplicate is not None:
                 if duplicate.task is not None:
@@ -530,6 +537,7 @@ class TaskManager:
                         disable_mirror=disable_mirror,
                         mirror_url=mirror_url,
                         disable_proxy=disable_proxy,
+                        selected_paths=selected_paths,
                     )
                     return TaskCreationResult(completed, "artifact")
 
@@ -543,6 +551,7 @@ class TaskManager:
                 mirror_url=mirror_url,
                 disable_proxy=disable_proxy,
                 scheduled_at=scheduled_at,
+                selected_paths=selected_paths,
             )
             if task.status is TaskStatus.SCHEDULED:
                 self._arm_scheduled_task(task)
@@ -563,6 +572,7 @@ class TaskManager:
         mirror_url: str | None = None,
         disable_proxy: bool = False,
         scheduled_at: datetime | None = None,
+        selected_paths: list[str] | None = None,
     ) -> DownloadTask:
         return (
             await self.create_with_result(
@@ -575,6 +585,7 @@ class TaskManager:
                 mirror_url=mirror_url,
                 disable_proxy=disable_proxy,
                 scheduled_at=scheduled_at,
+                selected_paths=selected_paths,
             )
         ).task
 
@@ -761,6 +772,12 @@ class TaskManager:
             download_root.mkdir(parents=True, exist_ok=True)
             await self._update(task_id, status=TaskStatus.DOWNLOADING, progress=2)
             self._start_metrics(task)
+
+            async def report_progress(downloaded: int, reported_total: int | None) -> None:
+                total = task.total_bytes if task.total_bytes is not None else reported_total
+                transferred = min(downloaded, total) if total is not None else downloaded
+                await self._progress(task_id, transferred, total)
+
             download_revision = task.requested_revision
             if task.resolved_revision and task.provider is Provider.HUGGINGFACE:
                 download_revision = task.resolved_revision
@@ -775,9 +792,7 @@ class TaskManager:
                 task.source_id,
                 download_revision,
                 download_root,
-                lambda downloaded, total: self._progress(
-                    task_id, downloaded, total if total is not None else task.total_bytes
-                ),
+                report_progress,
                 github_token=self.github_token,
                 huggingface_mirror=self.huggingface_mirror,
                 modelscope_cn_mirror=self.modelscope_cn_mirror,
@@ -787,6 +802,7 @@ class TaskManager:
                 mirror_url=task.mirror_url,
                 disable_proxy=task.disable_proxy,
                 expected_resolved_revision=task.resolved_revision,
+                selected_paths=task.selected_paths,
             )
             self._raise_if_stopped(task_id)
             if (
@@ -801,6 +817,21 @@ class TaskManager:
             files = inventory(download_root)
             if not files:
                 raise RuntimeError("provider returned no files")
+            if task.selected_paths is not None:
+                expected_paths = set(task.selected_paths)
+                actual_paths = {file.path for file in files}
+                missing = sorted(expected_paths - actual_paths)
+                unexpected = sorted(actual_paths - expected_paths)
+                if missing or unexpected:
+                    details: list[str] = []
+                    if missing:
+                        details.append("missing " + ", ".join(missing[:3]))
+                    if unexpected:
+                        details.append("unexpected " + ", ".join(unexpected[:3]))
+                    raise RuntimeError(
+                        "downloaded files do not exactly match the selected files: "
+                        + "; ".join(details)
+                    )
             downloaded_size = sum(file.size for file in files)
             if task.total_bytes is not None and downloaded_size != task.total_bytes:
                 raise RuntimeError(
@@ -838,6 +869,7 @@ class TaskManager:
                     requested_revision=task.requested_revision,
                     resolved_revision=resolved_revision,
                     url=result.source_url,
+                    selected_paths=task.selected_paths,
                 ),
             )
             await self._update(
@@ -855,6 +887,8 @@ class TaskManager:
                 status=TaskStatus.COMPLETED,
                 progress=100,
                 artifact_id=manifest.artifact_id,
+                bytes_downloaded=manifest.total_size,
+                total_bytes=manifest.total_size,
                 instantaneous_bytes_per_second=0,
                 eta_seconds=0,
             )

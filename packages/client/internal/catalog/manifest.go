@@ -21,7 +21,7 @@ import (
 )
 
 const ManifestPath = ".modelshelf/manifest.json"
-const CurrentManifestSchemaVersion = 1
+const CurrentManifestSchemaVersion = 2
 
 type VerifyOptions struct {
 	Full       bool
@@ -58,7 +58,7 @@ func ReadManifest(root string) (domain.ArtifactManifest, error) {
 }
 
 func ValidateManifest(manifest domain.ArtifactManifest) error {
-	if manifest.SchemaVersion != CurrentManifestSchemaVersion {
+	if manifest.SchemaVersion < 1 || manifest.SchemaVersion > CurrentManifestSchemaVersion {
 		if manifest.SchemaVersion > CurrentManifestSchemaVersion {
 			return fmt.Errorf(
 				"manifest schemaVersion %d is newer than supported version %d; upgrade ModelShelf",
@@ -101,6 +101,20 @@ func ValidateManifest(manifest domain.ArtifactManifest) error {
 			return fmt.Errorf("manifest contains duplicate path %q", entry.Path)
 		}
 		seen[entry.Path] = struct{}{}
+	}
+	if manifest.Source.SelectedPaths != nil {
+		selected := domain.CanonicalFiles(manifest.Source.SelectedPaths)
+		if len(selected) == 0 {
+			return errors.New("manifest source selectedPaths cannot be empty")
+		}
+		if len(selected) != len(seen) {
+			return errors.New("manifest selectedPaths does not match files")
+		}
+		for _, selectedPath := range selected {
+			if _, ok := seen[selectedPath]; !ok {
+				return errors.New("manifest selectedPaths does not match files")
+			}
+		}
 	}
 	return nil
 }

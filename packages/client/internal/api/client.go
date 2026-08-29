@@ -57,9 +57,12 @@ func (client *Client) Tasks(ctx context.Context) ([]domain.DownloadTask, error) 
 }
 
 func (client *Client) CreateTask(
-	ctx context.Context, provider, id, revision string,
+	ctx context.Context, provider, id, revision string, selectedPaths ...[]string,
 ) (domain.DownloadTask, error) {
-	payload := map[string]string{"provider": provider, "id": id, "revision": revision}
+	payload := map[string]any{"provider": provider, "id": id, "revision": revision}
+	if len(selectedPaths) > 0 && selectedPaths[0] != nil {
+		payload["selectedPaths"] = selectedPaths[0]
+	}
 	var result domain.DownloadTask
 	err := client.request(ctx, http.MethodPost, "/api/v1/tasks", payload, &result)
 	return result, err

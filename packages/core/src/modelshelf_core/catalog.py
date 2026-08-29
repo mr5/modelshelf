@@ -18,6 +18,7 @@ from .identity import (
     artifact_identity,
     artifact_identity_from_relative_path,
     artifact_relative_path,
+    selection_digest,
 )
 from .models import (
     ArtifactManifest,
@@ -149,8 +150,16 @@ class Catalog:
     def staging_path(self, task_id: str) -> Path:
         return self.staging_root / task_id
 
-    def artifact_path(self, provider: Provider, source_id: str, resolved_revision: str) -> Path:
-        return self.artifacts_root / artifact_relative_path(provider, source_id, resolved_revision)
+    def artifact_path(
+        self,
+        provider: Provider,
+        source_id: str,
+        resolved_revision: str,
+        selected_paths: list[str] | None = None,
+    ) -> Path:
+        return self.artifacts_root / artifact_relative_path(
+            provider, source_id, resolved_revision, selected_paths
+        )
 
     def create_manifest(
         self,
@@ -165,8 +174,13 @@ class Catalog:
         files = inventory(root) if files is None else files
         digest = content_digest(files)
         manifest = ArtifactManifest(
-            schema_version=1,
-            artifact_id=artifact_identity(source.provider, source.id, source.resolved_revision),
+            schema_version=2,
+            artifact_id=artifact_identity(
+                source.provider,
+                source.id,
+                source.resolved_revision,
+                source.selected_paths,
+            ),
             name=name,
             version=version,
             format=format,
@@ -185,7 +199,10 @@ class Catalog:
 
     def publish(self, staging: Path, manifest: ArtifactManifest) -> tuple[Path, bool]:
         destination = self.artifact_path(
-            manifest.source.provider, manifest.source.id, manifest.source.resolved_revision
+            manifest.source.provider,
+            manifest.source.id,
+            manifest.source.resolved_revision,
+            manifest.source.selected_paths,
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
@@ -221,7 +238,10 @@ class Catalog:
 
     def _summary(self, artifact_root: Path, manifest: ArtifactManifest) -> ArtifactSummary:
         relative_path = artifact_relative_path(
-            manifest.source.provider, manifest.source.id, manifest.source.resolved_revision
+            manifest.source.provider,
+            manifest.source.id,
+            manifest.source.resolved_revision,
+            manifest.source.selected_paths,
         )
         if artifact_root != self.artifacts_root / relative_path:
             raise VerificationError("manifest identity does not match its artifact path")
@@ -237,6 +257,8 @@ class Catalog:
             file_count=manifest.file_count,
             created_at=manifest.created_at,
             relative_path=relative_path,
+            selection_digest=selection_digest(manifest.source.selected_paths),
+            selected_paths=manifest.source.selected_paths,
         )
 
     def _index_artifact(self, artifact_root: Path, manifest: ArtifactManifest) -> None:
@@ -390,6 +412,7 @@ def verify_artifact(root: Path, *, full: bool, unexpected: bool = False) -> list
         manifest.source.provider,
         manifest.source.id,
         manifest.source.resolved_revision,
+        manifest.source.selected_paths,
     )
     if manifest.artifact_id != expected_id:
         failures.append("manifest artifactId does not match source identity")

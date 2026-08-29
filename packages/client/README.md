@@ -32,8 +32,14 @@ The default config is `~/.config/modelshelf/config.yml`; `MODELSHELF_CONFIG` ove
 `config.lock.yml`, never back into user configuration.
 
 `sync` preserves locked revisions, `sync --update` refreshes branches/tags, and
-`sync --frozen-lockfile` rejects required lock changes. Both YAML files use `schemaVersion: 1`;
-an older client refuses a future lock instead of silently repinning a moving revision.
+`sync --frozen-lockfile` rejects required lock changes. Both YAML files currently use
+`schemaVersion: 2`; v1 files migrate losslessly, while an older client refuses a future lock
+instead of silently repinning a moving revision.
+
+Optional `files` entries identify one complete GGUF variant recognized by the server. The
+equivalent CLI form repeats `--file`; split variants must include every shard. Arbitrary partial
+file sets are rejected rather than published as potentially unusable models. Auxiliary GGUF files
+such as projectors are not inferred; use the full repository when they are required.
 
 Canonical bytes live once under:
 

@@ -295,6 +295,7 @@ func (application *Application) addCommand() *cobra.Command {
 	var revision string
 	var modelPath string
 	var alias string
+	var files []string
 	command := &cobra.Command{
 		Use:   "add <provider> <model-id>",
 		Short: "Add a desired model, then sync it or create a server task",
@@ -327,12 +328,13 @@ func (application *Application) addCommand() *cobra.Command {
 			if desired == nil {
 				configuration.Models = append(configuration.Models, domain.DesiredModel{
 					Alias: alias, Provider: provider, ID: id,
-					RequestedRevision: revision, Path: modelPath,
+					RequestedRevision: revision, Path: modelPath, Files: files,
 				})
 				desired = &configuration.Models[len(configuration.Models)-1]
 			} else {
 				desired.RequestedRevision = revision
 				desired.ResolvedRevision = ""
+				desired.Files = domain.CanonicalFiles(files)
 				if modelPath != "" {
 					desired.Path = modelPath
 				}
@@ -350,13 +352,15 @@ func (application *Application) addCommand() *cobra.Command {
 						return candidate.Alias == selectedAlias
 					}
 					return candidate.Provider == provider && candidate.ID == id &&
-						candidate.RequestedRevision == revision
+						candidate.RequestedRevision == revision &&
+						domain.FilesKey(candidate.Files) == domain.FilesKey(files)
 				}, false, false)
 		},
 	}
 	command.Flags().StringVarP(&revision, "revision", "r", "main", "requested branch, tag, or revision")
 	command.Flags().StringVar(&modelPath, "path", "", "additional symbolic-link path for this model")
 	command.Flags().StringVar(&alias, "alias", "", "optional unique local alias")
+	command.Flags().StringArrayVar(&files, "file", nil, "file in one complete GGUF variant (repeatable)")
 	return command
 }
 
@@ -397,7 +401,9 @@ func (application *Application) removeCommand() *cobra.Command {
 				key := lockfile.DesiredKey(desired)
 				filtered := locked.Models[:0]
 				for _, entry := range locked.Models {
-					if lockfile.DeclarationKey(entry.Alias, entry.Provider, entry.ID, entry.Revision) != key {
+					if lockfile.DeclarationKey(
+						entry.Alias, entry.Provider, entry.ID, entry.Revision, entry.Files,
+					) != key {
 						filtered = append(filtered, entry)
 					}
 				}
@@ -894,7 +900,7 @@ func (application *Application) reconcileAndSync(
 		}
 		locked := lockfile.Model{
 			Alias: desired.Alias, Provider: desired.Provider, ID: desired.ID,
-			Revision: desired.RequestedRevision, Path: desired.Path,
+			Revision: desired.RequestedRevision, Path: desired.Path, Files: desired.Files,
 			ResolvedRevision: artifact.ResolvedRevision, ArtifactID: artifact.ArtifactID,
 			RelativePath: artifact.RelativePath, LockedAt: lockedAt,
 		}
@@ -976,6 +982,7 @@ func reconcileLocalReferences(
 			Alias: old.Alias, Provider: old.Provider, ID: old.ID,
 			RequestedRevision: old.Revision, ResolvedRevision: old.ResolvedRevision,
 			ArtifactID: old.ArtifactID, RelativePath: old.RelativePath, Path: old.Path,
+			Files: old.Files,
 		}
 		artifactPath, err := config.ArtifactPath(configuration, old.RelativePath)
 		if err != nil {
@@ -1015,7 +1022,7 @@ func removeUnreferencedRevisionReference(
 		desired := domain.DesiredModel{
 			Provider: entry.Provider, ID: entry.ID,
 			RequestedRevision: entry.Revision, ResolvedRevision: entry.ResolvedRevision,
-			ArtifactID: entry.ArtifactID, RelativePath: entry.RelativePath,
+			ArtifactID: entry.ArtifactID, RelativePath: entry.RelativePath, Files: entry.Files,
 		}
 		candidate, candidateExists, candidateErr := config.RevisionReferencePath(
 			configuration, desired, artifactPath,
@@ -1048,6 +1055,7 @@ func (application *Application) handleUnavailable(
 		for _, task := range tasks {
 			if task.Provider == desired.Provider && task.SourceID == desired.ID &&
 				task.RequestedRevision == desired.RequestedRevision &&
+				domain.FilesKey(task.SelectedPaths) == domain.FilesKey(desired.Files) &&
 				task.Status != "failed" && task.Status != "cancelled" &&
 				task.Status != "completed" {
 				fmt.Fprintf(application.Stdout, "Download task %s is %s for %s\n",
@@ -1056,7 +1064,9 @@ func (application *Application) handleUnavailable(
 			}
 		}
 	}
-	task, err := client.CreateTask(ctx, desired.Provider, desired.ID, desired.RequestedRevision)
+	task, err := client.CreateTask(
+		ctx, desired.Provider, desired.ID, desired.RequestedRevision, desired.Files,
+	)
 	if err != nil {
 		return &ExitError{Code: ExitUnavailable, Err: fmt.Errorf(
 			"revision %q could not be requested: %w", desired.RequestedRevision, err,
@@ -1100,7 +1110,7 @@ func lockMatchesConfig(locked lockfile.File, configuration config.Config) bool {
 func lockEntryMatchesDesired(entry lockfile.Model, desired domain.DesiredModel) bool {
 	return entry.Alias == desired.Alias && entry.Provider == desired.Provider &&
 		entry.ID == desired.ID && entry.Revision == desired.RequestedRevision &&
-		entry.Path == desired.Path
+		entry.Path == desired.Path && domain.FilesKey(entry.Files) == domain.FilesKey(desired.Files)
 }
 
 func findDesired(configuration *config.Config, provider, id string) *domain.DesiredModel {
@@ -1236,6 +1246,9 @@ func manifestMatchesDesired(
 	manifest domain.ArtifactManifest, desired domain.DesiredModel,
 ) bool {
 	if manifest.Source.Provider != desired.Provider || manifest.Source.ID != desired.ID {
+		return false
+	}
+	if domain.FilesKey(manifest.Source.SelectedPaths) != domain.FilesKey(desired.Files) {
 		return false
 	}
 	if desired.ResolvedRevision != "" {

@@ -154,7 +154,7 @@ curl -fsSL https://raw.githubusercontent.com/mr5/modelshelf/main/packages/client
 默认配置文件是 `~/.config/modelshelf/config.yml`，可以通过 `MODELSHELF_CONFIG` 修改：
 
 ```yaml
-schemaVersion: 1
+schemaVersion: 2
 serverUrl: http://modelshelf.internal:8080
 nfsLocalPath: /mnt/modelshelf
 localBasePath: /var/lib/modelshelf
@@ -170,6 +170,10 @@ models:
     revision: master
     path: runtime/qwen-2.5-7b
 ```
+
+可选的 `files` 仅用于服务端能够完整识别的 GGUF variant；分片版本必须包含全部分片，
+其他仓库类型始终完整下载。`mmproj` 等辅助 GGUF 不会被自动纳入 variant；需要这些文件时
+应完整下载仓库。
 
 `sync` 将不可变 revision 写入 `config.lock.yml`，不会修改用户的 desired-state 配置。普通
 sync 保留现有 lock；`sync --update` 更新移动的 revision；`sync --frozen-lockfile` 在需要

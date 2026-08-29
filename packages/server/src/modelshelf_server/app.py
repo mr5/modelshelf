@@ -9,6 +9,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -44,6 +45,7 @@ from .providers import (
     ProviderRequestError,
     ProviderUnavailable,
     RevisionDiscovery,
+    discover_gguf_variants,
     discover_revisions,
     estimate_download,
     provider_failure_detail,
@@ -66,6 +68,7 @@ class CreateTaskRequest(BaseModel):
     mirror_url: str | None = Field(default=None, alias="mirrorUrl")
     disable_proxy: bool = Field(default=False, alias="disableProxy")
     scheduled_at: datetime | None = Field(default=None, alias="scheduledAt")
+    selected_paths: list[str] | None = Field(default=None, alias="selectedPaths")
 
     @field_validator("mirror_url", mode="before")
     @classmethod
@@ -91,6 +94,20 @@ class CreateTaskRequest(BaseModel):
             raise ValueError("scheduled start must include a timezone")
         return value.astimezone(UTC)
 
+    @field_validator("selected_paths")
+    @classmethod
+    def validate_selected_paths(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        normalized = sorted(set(value))
+        if not normalized:
+            raise ValueError("selected paths cannot be empty")
+        for path in normalized:
+            candidate = PurePosixPath(path)
+            if candidate.is_absolute() or ".." in candidate.parts or path in {"", "."}:
+                raise ValueError("selected paths must be safe relative paths")
+        return normalized
+
     @model_validator(mode="after")
     def validate_network_route(self) -> CreateTaskRequest:
         mirror_providers = {
@@ -102,7 +119,41 @@ class CreateTaskRequest(BaseModel):
             raise ValueError("temporary mirrors are not supported for this source")
         if self.mirror_url and self.disable_mirror:
             raise ValueError("temporary mirror and mirror bypass cannot be enabled together")
+        selectable = {Provider.HUGGINGFACE, Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}
+        if self.selected_paths and self.provider not in selectable:
+            raise ValueError("file selection is not supported for this source")
         return self
+
+
+def _selected_estimate(
+    estimate: DownloadEstimate, selected_paths: list[str] | None
+) -> tuple[list[str] | None, int | None, int | None]:
+    if selected_paths is None:
+        return None, estimate.total_size, estimate.file_count
+    available = {file.path: file.size for file in estimate.files}
+    unknown = sorted(set(selected_paths) - available.keys())
+    if unknown:
+        preview = ", ".join(unknown[:3])
+        suffix = "…" if len(unknown) > 3 else ""
+        raise ValueError(
+            f"selected files are not present at the resolved revision: {preview}{suffix}"
+        )
+    normalized = sorted(set(selected_paths))
+    variants = discover_gguf_variants(estimate.files)
+    if not any(sorted(variant.paths) == normalized for variant in variants):
+        raise ValueError(
+            "selected files must exactly match one complete, recognized GGUF variant; "
+            "download the full repository when variant selection is unavailable"
+        )
+    if len(normalized) == len(available):
+        return None, estimate.total_size, estimate.file_count
+    sizes = [available[path] for path in normalized]
+    total = (
+        sum(size for size in sizes if size is not None)
+        if all(size is not None for size in sizes)
+        else None
+    )
+    return normalized, total, len(normalized)
 
 
 class ConfirmHttpRequest(BaseModel):
@@ -634,6 +685,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             str | None, Query(alias="mirrorUrl", min_length=1, max_length=2048)
         ] = None,
         disable_proxy: Annotated[bool, Query(alias="disableProxy")] = False,
+        selected_path: Annotated[list[str] | None, Query(alias="selectedPath")] = None,
     ) -> dict[str, object]:
         try:
             request = CreateTaskRequest(
@@ -643,6 +695,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 disableMirror=disable_mirror,
                 mirrorUrl=mirror_url,
                 disableProxy=disable_proxy,
+                selectedPaths=selected_path,
             )
         except ValidationError as error:
             raise HTTPException(
@@ -658,6 +711,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request.disable_proxy,
         )
         response = result.as_dict()
+        try:
+            normalized_selection, selected_total, selected_count = _selected_estimate(
+                result, request.selected_paths
+            )
+        except ValueError as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        if normalized_selection is not None:
+            response["selectedPaths"] = normalized_selection
+            response["totalSize"] = selected_total
+            response["fileCount"] = selected_count
         duplicate = manager.find_duplicate(
             result.provider,
             result.source_id,
@@ -666,6 +729,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             disable_mirror=request.disable_mirror,
             mirror_url=request.mirror_url,
             disable_proxy=request.disable_proxy,
+            selected_paths=normalized_selection,
         )
         if duplicate is not None:
             response["duplicate"] = duplicate.as_dict()
@@ -723,9 +787,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await control_task(task_id, "pause")
 
     @app.post("/api/v1/tasks/{task_id}/resume", dependencies=[Depends(require_write)])
-    async def resume_task(
-        task_id: str, body: ResumeTaskRequest | None = None
-    ) -> dict[str, Any]:
+    async def resume_task(task_id: str, body: ResumeTaskRequest | None = None) -> dict[str, Any]:
         try:
             item = await manager.resume(
                 task_id, scheduled_at=body.scheduled_at if body is not None else None
@@ -758,16 +820,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.mirror_url,
             body.disable_proxy,
         )
+        try:
+            selected_paths, total_bytes, _selected_count = _selected_estimate(
+                estimate, body.selected_paths
+            )
+        except ValueError as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
         creation = await manager.create_with_result(
             estimate.provider,
             estimate.source_id,
             estimate.requested_revision,
             resolved_revision=estimate.resolved_revision,
-            total_bytes=estimate.total_size,
+            total_bytes=total_bytes,
             disable_mirror=body.disable_mirror,
             mirror_url=body.mirror_url,
             disable_proxy=body.disable_proxy,
             scheduled_at=body.scheduled_at,
+            selected_paths=selected_paths,
         )
         item = creation.task
         result = item.model_dump(mode="json", by_alias=True, exclude_none=True)

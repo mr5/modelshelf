@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -10,7 +11,7 @@ from pathlib import Path
 from .identity import artifact_relative_path
 from .models import ArtifactSummary, Provider
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class CatalogIndexVersionError(RuntimeError):
@@ -73,6 +74,8 @@ class CatalogIndex:
                     source_id TEXT NOT NULL,
                     requested_revision TEXT NOT NULL,
                     resolved_revision TEXT NOT NULL,
+                    selection_digest TEXT,
+                    selected_paths_json TEXT,
                     total_size INTEGER NOT NULL,
                     file_count INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
@@ -128,6 +131,10 @@ class CatalogIndex:
             summary.source_id,
             summary.requested_revision,
             summary.resolved_revision,
+            summary.selection_digest,
+            json.dumps(summary.selected_paths, separators=(",", ":"))
+            if summary.selected_paths is not None
+            else None,
             summary.total_size,
             summary.file_count,
             summary.created_at.isoformat(),
@@ -141,9 +148,10 @@ class CatalogIndex:
         return """
             INSERT INTO artifacts (
                 artifact_id, name, version, provider, source_id, requested_revision,
-                resolved_revision, total_size, file_count, created_at,
+                resolved_revision, selection_digest, selected_paths_json,
+                total_size, file_count, created_at,
                 search_text, manifest_mtime_ns, manifest_size
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(artifact_id) DO UPDATE SET
                 name = excluded.name,
                 version = excluded.version,
@@ -151,6 +159,8 @@ class CatalogIndex:
                 source_id = excluded.source_id,
                 requested_revision = excluded.requested_revision,
                 resolved_revision = excluded.resolved_revision,
+                selection_digest = excluded.selection_digest,
+                selected_paths_json = excluded.selected_paths_json,
                 total_size = excluded.total_size,
                 file_count = excluded.file_count,
                 created_at = excluded.created_at,
@@ -215,11 +225,18 @@ class CatalogIndex:
                 "sourceId": row["source_id"],
                 "requestedRevision": row["requested_revision"],
                 "resolvedRevision": row["resolved_revision"],
+                "selectionDigest": row["selection_digest"],
+                "selectedPaths": json.loads(row["selected_paths_json"])
+                if row["selected_paths_json"] is not None
+                else None,
                 "totalSize": row["total_size"],
                 "fileCount": row["file_count"],
                 "createdAt": row["created_at"],
                 "relativePath": artifact_relative_path(
-                    Provider(row["provider"]), row["source_id"], row["resolved_revision"]
+                    Provider(row["provider"]),
+                    row["source_id"],
+                    row["resolved_revision"],
+                    selected_paths_digest=row["selection_digest"],
                 ),
             }
         )

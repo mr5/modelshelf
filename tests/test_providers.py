@@ -64,6 +64,41 @@ def test_empty_huggingface_token_is_treated_as_anonymous(
     assert provider_module._huggingface_token() == "hf_test_token"
 
 
+def test_huggingface_selected_download_passes_exact_allow_patterns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def snapshot_download(**kwargs: object) -> str:
+        captured.update(kwargs)
+        destination = Path(str(kwargs["local_dir"]))
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "model.gguf").write_bytes(b"model")
+        return str(destination)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    monkeypatch.setattr(
+        huggingface_hub,
+        "HfApi",
+        lambda **_kwargs: SimpleNamespace(
+            model_info=lambda *_args, **_kwargs: SimpleNamespace(sha="a" * 40)
+        ),
+    )
+    result = asyncio.run(
+        provider_module.download_huggingface(
+            "owner/model",
+            "a" * 40,
+            tmp_path / "artifact",
+            lambda _downloaded, _total: asyncio.sleep(0),
+            "https://huggingface.co",
+            ["model.gguf"],
+        )
+    )
+
+    assert result.resolved_revision == "a" * 40
+    assert captured["allow_patterns"] == ["model.gguf"]
+
+
 def test_modelscope_authentication_error_names_the_selected_site_token() -> None:
     class AuthenticationError(RuntimeError):
         pass
@@ -218,6 +253,48 @@ def test_modelscope_download_rejects_a_revision_that_moves_during_download(
         )
 
 
+def test_modelscope_selected_download_uses_requested_revision_and_checks_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = "c" * 40
+    resolutions = 0
+    captured: dict[str, object] = {}
+
+    async def resolve(*_args: object, **_kwargs: object) -> str:
+        nonlocal resolutions
+        resolutions += 1
+        return resolved
+
+    async def selected_download(*args: object) -> None:
+        captured["revision"] = args[1]
+        captured["selected_paths"] = args[-1]
+        destination = args[2]
+        assert isinstance(destination, Path)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "model.gguf").write_bytes(b"model")
+
+    monkeypatch.setattr(provider_module, "_resolve_modelscope_revision", resolve)
+    monkeypatch.setattr(provider_module, "_download_modelscope_selected", selected_download)
+
+    result = asyncio.run(
+        provider_module.download_modelscope(
+            Provider.MODELSCOPE_CN,
+            "owner/model",
+            "master",
+            tmp_path / "artifact",
+            lambda _downloaded, _total: asyncio.sleep(0),
+            "https://modelscope.cn",
+            None,
+            resolved,
+            ["model.gguf"],
+        )
+    )
+
+    assert result.resolved_revision == resolved
+    assert resolutions == 2
+    assert captured == {"revision": "master", "selected_paths": ["model.gguf"]}
+
+
 def test_modelscope_git_estimate_uses_lfs_object_sizes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -246,7 +323,7 @@ def test_modelscope_git_estimate_uses_lfs_object_sizes(
 
     monkeypatch.setattr(provider_module, "_prepare_modelscope_git_checkout", prepare)
 
-    total_size, file_count = provider_module._estimate_modelscope_git(
+    total_size, files = provider_module._estimate_modelscope_git(
         "owner/model",
         "master",
         "a" * 40,
@@ -255,7 +332,8 @@ def test_modelscope_git_estimate_uses_lfs_object_sizes(
     )
 
     assert total_size == 1048576 + len("*.bin filter=lfs\n") + len("{}")
-    assert file_count == 3
+    assert len(files) == 3
+    assert {file.path for file in files} == {".gitattributes", "config.json", "model.bin"}
 
 
 def test_modelscope_estimate_resolves_revision_before_reading_git_metadata(
@@ -268,9 +346,9 @@ def test_modelscope_estimate_resolves_revision_before_reading_git_metadata(
         calls.append(args)
         return resolved
 
-    def estimate(*args: object) -> tuple[int, int]:
+    def estimate(*args: object) -> tuple[int, tuple[provider_module.SourceFile, ...]]:
         calls.append(args)
-        return 1234, 5
+        return 1234, tuple(provider_module.SourceFile(f"file-{index}.bin", 1) for index in range(5))
 
     monkeypatch.setattr(provider_module, "_resolve_modelscope_revision", resolve)
     monkeypatch.setattr(provider_module, "_estimate_modelscope_git", estimate)
@@ -289,6 +367,69 @@ def test_modelscope_estimate_resolves_revision_before_reading_git_metadata(
     assert result.total_size == 1234
     assert result.file_count == 5
     assert calls[1][1:3] == ("master", resolved)
+
+
+def test_discovers_only_complete_unambiguous_gguf_variants() -> None:
+    files = (
+        provider_module.SourceFile("README.md", 10),
+        provider_module.SourceFile("Q4/model-Q4-00002-of-00002.gguf", 20),
+        provider_module.SourceFile("Q4/model-Q4-00001-of-00002.gguf", 15),
+        provider_module.SourceFile("Q8/model-Q8.gguf", 40),
+    )
+
+    variants = provider_module.discover_gguf_variants(files)
+
+    assert [variant.label for variant in variants] == [
+        "Q4/model-Q4.gguf",
+        "Q8/model-Q8.gguf",
+    ]
+    assert variants[0].paths == (
+        "Q4/model-Q4-00001-of-00002.gguf",
+        "Q4/model-Q4-00002-of-00002.gguf",
+    )
+    assert variants[0].total_size == 35
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        (
+            provider_module.SourceFile("model-00001-of-00003.gguf", 1),
+            provider_module.SourceFile("model-00003-of-00003.gguf", 1),
+        ),
+        (
+            provider_module.SourceFile("model.gguf", 1),
+            provider_module.SourceFile("model.safetensors", 1),
+        ),
+    ],
+)
+def test_rejects_ambiguous_or_dependency_bearing_gguf_repositories(
+    files: tuple[provider_module.SourceFile, ...],
+) -> None:
+    assert provider_module.discover_gguf_variants(files) == ()
+
+
+def test_auxiliary_gguf_files_do_not_hide_primary_variants() -> None:
+    files = (
+        provider_module.SourceFile("model.gguf", 10),
+        provider_module.SourceFile("mmproj-BF16.gguf", 2),
+    )
+
+    variants = provider_module.discover_gguf_variants(files)
+
+    assert len(variants) == 1
+    assert variants[0].paths == ("model.gguf",)
+
+    estimate = provider_module.DownloadEstimate(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        "a" * 40,
+        12,
+        2,
+        files=files,
+    ).as_dict()
+    assert estimate["ggufAuxiliaryFiles"] == [{"path": "mmproj-BF16.gguf", "size": 2}]
 
 
 def test_provider_error_detail_keeps_the_cause_and_redacts_credentials(

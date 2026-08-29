@@ -113,6 +113,35 @@ func TestSelectArtifactRequiresRequestedRevisionOrPin(t *testing.T) {
 	}
 }
 
+func TestSelectArtifactDistinguishesFullAndSelectedVariants(t *testing.T) {
+	now := time.Now()
+	artifacts := []domain.ArtifactSummary{
+		{
+			ArtifactID: "full", Provider: "huggingface", SourceID: "owner/model",
+			RequestedRevision: "main", ResolvedRevision: "commit", CreatedAt: now,
+		},
+		{
+			ArtifactID: "partial", Provider: "huggingface", SourceID: "owner/model",
+			RequestedRevision: "main", ResolvedRevision: "commit", CreatedAt: now.Add(time.Second),
+			SelectionDigest: domain.SelectionDigest([]string{"model.gguf"}),
+			SelectedPaths:   []string{"model.gguf"},
+		},
+	}
+	full := SelectArtifact(artifacts, domain.DesiredModel{
+		Provider: "huggingface", ID: "owner/model", RequestedRevision: "main",
+	})
+	if full == nil || full.ArtifactID != "full" {
+		t.Fatalf("full selection = %#v", full)
+	}
+	partial := SelectArtifact(artifacts, domain.DesiredModel{
+		Provider: "huggingface", ID: "owner/model", RequestedRevision: "main",
+		Files: []string{"model.gguf"},
+	})
+	if partial == nil || partial.ArtifactID != "partial" {
+		t.Fatalf("partial selection = %#v", partial)
+	}
+}
+
 func TestDuplicateAliasesAndCustomPathShareCanonicalArtifact(t *testing.T) {
 	root := t.TempDir()
 	nfs := filepath.Join(root, "nfs")

@@ -22,6 +22,7 @@ func TestRoundTripAndFind(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.lock.yml")
 	wanted := File{Models: []Model{{
 		Alias: "mini", Provider: "huggingface", ID: "owner/model", Revision: "main",
+		Files:            []string{"model.gguf"},
 		ResolvedRevision: "abc", ArtifactID: "artifact",
 		RelativePath: "huggingface/owner/model/abc", LockedAt: time.Now().UTC(),
 	}}}
@@ -34,8 +35,9 @@ func TestRoundTripAndFind(t *testing.T) {
 	}
 	entry := Find(loaded, domain.DesiredModel{
 		Alias: "mini", Provider: "huggingface", ID: "owner/model", RequestedRevision: "main",
+		Files: []string{"model.gguf"},
 	})
-	if entry == nil || entry.ResolvedRevision != "abc" {
+	if entry == nil || entry.ResolvedRevision != "abc" || len(entry.Files) != 1 {
 		t.Fatalf("entry = %#v", entry)
 	}
 }
@@ -49,7 +51,7 @@ func TestMissingVersionIsMigratedAndFutureVersionIsRejected(t *testing.T) {
 	if err != nil || loaded.SchemaVersion != CurrentSchemaVersion {
 		t.Fatalf("legacy lock = %#v err=%v", loaded, err)
 	}
-	if err := os.WriteFile(path, []byte("schemaVersion: 2\nmodels: []\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("schemaVersion: 3\nmodels: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := Load(path); err == nil {

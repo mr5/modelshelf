@@ -42,6 +42,14 @@ export interface DownloadEstimate {
   fileCount?: number;
   hubUrl?: string;
   metadata: EstimateMetadata[];
+  ggufVariantSelectionAvailable?: boolean;
+  ggufVariants?: Array<{
+    label: string;
+    paths: string[];
+    totalSize?: number;
+    fileCount: number;
+  }>;
+  ggufAuxiliaryFiles?: Array<{ path: string; size?: number }>;
   duplicate?: {
     kind: "artifact" | "task";
     taskId?: string;
@@ -110,6 +118,7 @@ export interface DownloadTask {
   disableProxy?: boolean;
   scheduledAt?: string;
   resumeFromStage?: boolean;
+  selectedPaths?: string[];
   resolvedRevision?: string;
   status: TaskStatus;
   progress: number;
@@ -140,4 +149,6 @@ export interface ArtifactSummary {
   fileCount: number;
   createdAt: string;
   relativePath: string;
+  selectionDigest?: string;
+  selectedPaths?: string[];
 }

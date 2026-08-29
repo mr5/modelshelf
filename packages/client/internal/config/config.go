@@ -8,7 +8,10 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -25,9 +28,11 @@ type Config struct {
 	Models        []domain.DesiredModel `yaml:"models,omitempty"`
 }
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 const CurrentLocalLayoutSchemaVersion = 1
+
+var ggufSplitPattern = regexp.MustCompile(`(?i)^(.*)-(\d{5})-of-(\d{5})\.gguf$`)
 
 type localLayout struct {
 	SchemaVersion int    `json:"schemaVersion"`
@@ -108,6 +113,9 @@ func Load(path string) (Config, string, error) {
 func (config *Config) Validate() error {
 	if config.SchemaVersion == 0 {
 		// Pre-release configuration files did not include an explicit version.
+		config.SchemaVersion = 1
+	}
+	if config.SchemaVersion == 1 {
 		config.SchemaVersion = CurrentSchemaVersion
 	}
 	if config.SchemaVersion != CurrentSchemaVersion {
@@ -139,6 +147,26 @@ func (config *Config) Validate() error {
 	seenAliases := map[string]struct{}{}
 	seenReferences := map[string]string{}
 	for index, model := range config.Models {
+		if model.Files != nil {
+			if len(model.Files) == 0 {
+				return fmt.Errorf("models[%d].files cannot be empty", index)
+			}
+			if model.Provider != domain.ProviderHuggingFace &&
+				model.Provider != domain.ProviderModelScopeCN &&
+				model.Provider != domain.ProviderModelScopeAI {
+				return fmt.Errorf("models[%d].files is not supported for provider %q", index, model.Provider)
+			}
+			for _, file := range model.Files {
+				if err := validateSelectedFile(file); err != nil {
+					return fmt.Errorf("models[%d].files: %w", index, err)
+				}
+			}
+			config.Models[index].Files = domain.CanonicalFiles(model.Files)
+			model.Files = config.Models[index].Files
+			if err := validateGGUFVariant(model.Files); err != nil {
+				return fmt.Errorf("models[%d].files: %w", index, err)
+			}
+		}
 		if model.Alias != "" {
 			if strings.TrimSpace(model.Alias) != model.Alias {
 				return fmt.Errorf("models[%d].alias cannot start or end with whitespace", index)
@@ -173,7 +201,7 @@ func (config *Config) Validate() error {
 		} else {
 			seenSources[sourceKey] = model.Alias != ""
 		}
-		selector := sourceKey + "@" + model.RequestedRevision
+		selector := sourceKey + "@" + model.RequestedRevision + "#" + domain.SelectionDigest(model.Files)
 		references, referenceErr := ReferencePaths(*config, model)
 		if referenceErr != nil {
 			return fmt.Errorf("models[%d]: %w", index, referenceErr)
@@ -185,6 +213,60 @@ func (config *Config) Validate() error {
 			}
 			seenReferences[cleaned] = selector
 		}
+	}
+	return nil
+}
+
+func validateSelectedFile(file string) error {
+	if file == "" || file == "." || strings.HasPrefix(file, "/") || strings.Contains(file, "\\") {
+		return fmt.Errorf("%q is not a safe POSIX relative path", file)
+	}
+	for _, segment := range strings.Split(file, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return fmt.Errorf("%q is not a safe POSIX relative path", file)
+		}
+	}
+	return nil
+}
+
+func validateGGUFVariant(files []string) error {
+	if len(files) == 0 {
+		return errors.New("must identify one complete GGUF variant")
+	}
+	for _, file := range files {
+		name := strings.ToLower(path.Base(file))
+		if !strings.HasSuffix(name, ".gguf") {
+			return errors.New("only recognized GGUF variants may select files")
+		}
+		for _, marker := range []string{"adapter", "draft", "lora", "mmproj", "mtp", "projector"} {
+			if strings.Contains(name, marker) {
+				return fmt.Errorf("%q has an unsupported GGUF dependency role", file)
+			}
+		}
+	}
+
+	first := ggufSplitPattern.FindStringSubmatch(files[0])
+	if first == nil {
+		if len(files) != 1 {
+			return errors.New("multiple unsharded GGUF files are not one variant")
+		}
+		return nil
+	}
+	total, _ := strconv.Atoi(first[3])
+	if total < 1 || len(files) != total {
+		return fmt.Errorf("split GGUF variant requires %d shards", total)
+	}
+	seen := make(map[int]bool, total)
+	for _, file := range files {
+		match := ggufSplitPattern.FindStringSubmatch(file)
+		if match == nil || !strings.EqualFold(match[1], first[1]) || match[3] != first[3] {
+			return errors.New("files do not belong to one split GGUF variant")
+		}
+		index, _ := strconv.Atoi(match[2])
+		if index < 1 || index > total || seen[index] {
+			return errors.New("split GGUF shard numbering is invalid")
+		}
+		seen[index] = true
 	}
 	return nil
 }
@@ -343,6 +425,9 @@ func RevisionReferencePath(
 	segment, err := escapeReferenceSegment(model.RequestedRevision)
 	if err != nil {
 		return "", false, err
+	}
+	if digest := domain.SelectionDigest(model.Files); digest != "" {
+		segment += "~files-" + digest
 	}
 	reference := filepath.Join(filepath.Dir(artifactPath), segment)
 	if reference == artifactPath {

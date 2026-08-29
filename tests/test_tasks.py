@@ -171,7 +171,7 @@ def test_create_reuses_task_with_the_same_immutable_identity(tmp_path: Path) -> 
     asyncio.run(exercise())
 
 
-def test_old_task_files_are_atomically_upgraded_to_schema_v2(tmp_path: Path) -> None:
+def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path) -> None:
     catalog = Catalog(tmp_path / "storage")
     catalog.initialize()
     manager = TaskManager(catalog, github_token=None)
@@ -189,7 +189,7 @@ def test_old_task_files_are_atomically_upgraded_to_schema_v2(tmp_path: Path) -> 
     loaded = manager.store.get(task_id)
     assert loaded is not None
     assert loaded.mirror_url is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 2
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 3
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 1
@@ -199,10 +199,10 @@ def test_old_task_files_are_atomically_upgraded_to_schema_v2(tmp_path: Path) -> 
     assert migrated is not None
     assert migrated.mirror_url is None
     assert migrated.scheduled_at is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 2
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 3
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
-    document["schemaVersion"] = 3
+    document["schemaVersion"] = 4
     task_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
         manager.store.list()
@@ -367,6 +367,111 @@ def test_scheduled_task_does_not_enter_queue_until_its_start_time(
     asyncio.run(exercise())
 
 
+def test_selected_file_task_publishes_only_the_exact_validated_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = "7" * 40
+    selected = ["config.json", "weights/model.gguf"]
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: Progress,
+        **options: object,
+    ) -> ProviderResult:
+        assert options["selected_paths"] == selected
+        (destination / "weights").mkdir()
+        (destination / "config.json").write_text("{}", encoding="utf-8")
+        (destination / "weights/model.gguf").write_bytes(b"model")
+        return ProviderResult(resolved_revision=resolved)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.HUGGINGFACE,
+                "owner/model",
+                "main",
+                resolved_revision=resolved,
+                total_bytes=7,
+                selected_paths=selected,
+            )
+            deadline = asyncio.get_running_loop().time() + 2
+            while asyncio.get_running_loop().time() < deadline:
+                current = manager.store.get(task.id)
+                if current is not None and current.status in {
+                    TaskStatus.COMPLETED,
+                    TaskStatus.FAILED,
+                }:
+                    break
+                await asyncio.sleep(0.02)
+            current = manager.store.get(task.id)
+            assert current is not None and current.status is TaskStatus.COMPLETED, current
+            assert current.artifact_id is not None
+            found = catalog.find(current.artifact_id)
+            assert found is not None
+            summary, manifest = found
+            assert summary.selected_paths == selected
+            assert manifest.source.selected_paths == selected
+            assert {file.path for file in manifest.files} == set(selected)
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
+def test_selected_file_task_rejects_unexpected_provider_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: Progress,
+        **_options: object,
+    ) -> ProviderResult:
+        (destination / "model.gguf").write_bytes(b"model")
+        (destination / "unexpected.txt").write_text("extra", encoding="utf-8")
+        return ProviderResult(resolved_revision="8" * 40)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.HUGGINGFACE,
+                "owner/model",
+                "main",
+                resolved_revision="8" * 40,
+                selected_paths=["model.gguf"],
+            )
+            deadline = asyncio.get_running_loop().time() + 2
+            while asyncio.get_running_loop().time() < deadline:
+                current = manager.store.get(task.id)
+                if current is not None and current.status is TaskStatus.FAILED:
+                    break
+                await asyncio.sleep(0.02)
+            current = manager.store.get(task.id)
+            assert current is not None and current.status is TaskStatus.FAILED
+            assert current.error is not None and "unexpected unexpected.txt" in current.error
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
 def test_scheduled_task_can_start_immediately(tmp_path: Path) -> None:
     catalog = Catalog(tmp_path / "storage")
     catalog.initialize()
@@ -431,9 +536,7 @@ def test_delayed_resume_preserves_staging_data_across_restart(
 
     async def exercise() -> None:
         await seed.start()
-        scheduled = await seed.resume(
-            task.id, scheduled_at=datetime.now(UTC) + timedelta(hours=1)
-        )
+        scheduled = await seed.resume(task.id, scheduled_at=datetime.now(UTC) + timedelta(hours=1))
         assert scheduled.status is TaskStatus.SCHEDULED
         assert scheduled.resume_from_stage is True
         assert seed.queue.qsize() == 0

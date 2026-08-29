@@ -82,6 +82,9 @@ export function NewTaskPage() {
   const [disableProxy, setDisableProxy] = useState(false);
   const [delayDownload, setDelayDownload] = useState(false);
   const [scheduledAt, setScheduledAt] = useState("");
+  const [selectFiles, setSelectFiles] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [variantFilter, setVariantFilter] = useState("");
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [revisionOptions, setRevisionOptions] = useState<RevisionOption[]>([]);
   const [modelLookup, setModelLookup] = useState<LookupState>("idle");
@@ -202,6 +205,12 @@ export function NewTaskPage() {
   }, [disableMirror, disableProxy, id, mirrorUrl, provider, revision, useTemporaryMirror]);
 
   useEffect(() => {
+    setSelectFiles(false);
+    setVariantFilter("");
+    setSelectedPaths([]);
+  }, [estimate?.provider, estimate?.sourceId, estimate?.requestedRevision, estimate?.resolvedRevision]);
+
+  useEffect(() => {
     const sourceId = id.trim();
     if (!hasCompleteModelId(provider, sourceId)) {
       setRevisionOptions([]);
@@ -254,6 +263,7 @@ export function NewTaskPage() {
           mirrorUrl: useTemporaryMirror ? mirrorUrl.trim() : undefined,
           disableProxy,
           scheduledAt: scheduledStart?.toISOString(),
+          selectedPaths: selectFiles ? selectedPaths : undefined,
         }),
       });
       navigate(`/tasks/${task.id}`);
@@ -276,7 +286,22 @@ export function NewTaskPage() {
   const estimateIsCurrent = estimateLookup === "ready"
     && estimateKey === currentEstimateKey
     && estimate?.downloadable === true;
-  const duplicate = estimateIsCurrent ? estimate?.duplicate : undefined;
+  const availableVariants = estimate?.ggufVariants ?? [];
+  const normalizedFilter = variantFilter.trim().toLocaleLowerCase();
+  const visibleVariants = normalizedFilter
+    ? availableVariants.filter((variant) => variant.label.toLocaleLowerCase().includes(normalizedFilter))
+    : availableVariants;
+  const selectedVariant = availableVariants.find((variant) =>
+    variant.paths.length === selectedPaths.length
+    && variant.paths.every((path, index) => path === selectedPaths[index])
+  );
+  const displaySize = selectFiles && selectedVariant
+    ? selectedVariant.totalSize
+    : estimate?.totalSize;
+  const displayFileCount = selectFiles && selectedVariant
+    ? selectedVariant.fileCount
+    : estimate?.fileCount;
+  const duplicate = estimateIsCurrent && !selectFiles ? estimate?.duplicate : undefined;
   return <div className="page narrow">
     <Link className="back" to="/tasks">← Downloads</Link>
     <div className="page-head"><div><p className="eyebrow">New ingestion</p><h1>Download a model</h1></div></div>
@@ -433,16 +458,46 @@ export function NewTaskPage() {
             {duplicate.taskId && <Link to={`/tasks/${duplicate.taskId}`}>Open existing task →</Link>}
           </div>}
           <div className="estimate-summary">
-            <div><span>Estimated download</span><strong>{estimate.totalSize === undefined ? "Size unavailable" : formatDownloadSize(estimate.totalSize)}</strong></div>
-            <div><span>Files</span><strong>{estimate.fileCount === undefined ? "Unknown" : estimate.fileCount.toLocaleString()}</strong></div>
+            <div><span>Estimated download</span><strong>{displaySize === undefined ? "Size unavailable" : formatDownloadSize(displaySize)}</strong></div>
+            <div><span>Files</span><strong>{displayFileCount === undefined ? "Unknown" : displayFileCount.toLocaleString()}</strong></div>
           </div>
+          {estimate.ggufVariantSelectionAvailable && availableVariants.length > 0 && <section className="file-selection">
+            <label className="route-option no-border">
+              <input type="checkbox" checked={selectFiles} onChange={(event) => {
+                const checked = event.target.checked;
+                setSelectFiles(checked);
+                if (!checked) setSelectedPaths([]);
+              }} />
+              <span><strong>Download a specific GGUF variant</strong><small>Only complete, unambiguous variants are offered. All shards in the selected variant are downloaded together.</small></span>
+            </label>
+            {selectFiles && <div className="file-selection-body">
+              <div className="file-selection-tools">
+                <input type="search" value={variantFilter} placeholder="Filter GGUF variants" aria-label="Filter GGUF variants" onChange={(event) => setVariantFilter(event.target.value)} />
+              </div>
+              <div className="file-selection-list">
+                {visibleVariants.map((variant) => {
+                  const checked = variant.paths.length === selectedPaths.length
+                    && variant.paths.every((path, index) => path === selectedPaths[index]);
+                  return <label className="file-selection-item" key={variant.label}>
+                    <input type="radio" name="gguf-variant" checked={checked} onChange={() => setSelectedPaths(variant.paths)} />
+                    <span><code title={variant.paths.join("\n")}>{variant.label}</code><small>{variant.fileCount > 1 ? `${variant.fileCount} shards · ` : ""}{variant.totalSize === undefined ? "size unavailable" : formatDownloadSize(variant.totalSize)}</small></span>
+                  </label>;
+                })}
+                {visibleVariants.length === 0 && <p className="muted">No variants match this filter.</p>}
+              </div>
+              <div className={`file-selection-status ${selectedVariant ? "" : "invalid"}`}>{selectedVariant ? `${selectedVariant.fileCount.toLocaleString()} ${selectedVariant.fileCount === 1 ? "file" : "files"} selected${selectedVariant.totalSize === undefined ? "" : ` · ${formatDownloadSize(selectedVariant.totalSize)}`}` : "Select one GGUF variant."}</div>
+              {estimate.ggufAuxiliaryFiles && estimate.ggufAuxiliaryFiles.length > 0 && <div className="file-selection-note">
+                Auxiliary GGUF files such as projectors are not included. Download the full repository if your runtime needs them.
+              </div>}
+            </div>}
+          </section>}
           <div className="estimate-valid">✓ Revision exists and is accessible with the configured credentials.</div>
           {estimate.hubUrl && <a className="estimate-hub-link" href={estimate.hubUrl} target="_blank" rel="noreferrer">Open model page ↗</a>}
           {estimate.resolvedRevision && <div className="estimate-revision"><span>Resolved immutable revision</span><code>{estimate.resolvedRevision}</code></div>}
           {estimate.metadata.length > 0 && <dl className="estimate-metadata">
             {estimate.metadata.map((item) => <div key={`${item.label}-${item.value}`}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}
           </dl>}
-          {estimate.totalSize === undefined && <span className="field-help">The provider confirmed that the revision is downloadable but did not expose reliable size metadata.</span>}
+          {displaySize === undefined && <span className="field-help">The provider confirmed that the revision is downloadable but did not expose reliable size metadata.</span>}
         </>}
       </section>
       {provider === "http" && <div className="warning"><strong>Two-stage download</strong><span>The URL will only be downloaded into staging. After it finishes, you must review inferred metadata and explicitly choose whether to extract it before anything is published.</span></div>}
@@ -453,7 +508,7 @@ export function NewTaskPage() {
           ? <Link className="button existing-action" to={`/tasks/${duplicate.taskId}`}>Open existing task</Link>
           : duplicate?.kind === "artifact"
             ? <Link className="button existing-action" to="/artifacts">View artifact</Link>
-            : <button disabled={busy || !estimateIsCurrent}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : delayDownload ? "Schedule download" : "Start download"}</button>}
+            : <button disabled={busy || !estimateIsCurrent || (selectFiles && !selectedVariant)}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : delayDownload ? "Schedule download" : "Start download"}</button>}
       </div>
     </form>
   </div>;

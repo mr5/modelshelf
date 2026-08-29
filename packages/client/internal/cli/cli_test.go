@@ -275,7 +275,7 @@ models:
 	if err := os.WriteFile(configPath, []byte(configuration), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	futureLock := `schemaVersion: 2
+	futureLock := `schemaVersion: 3
 models: []
 `
 	if err := os.WriteFile(lockfile.Path(configPath), []byte(futureLock), 0o600); err != nil {
@@ -312,7 +312,7 @@ models: []
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(rebuiltData), "schemaVersion: 1") {
+	if !strings.Contains(string(rebuiltData), "schemaVersion: 2") {
 		t.Fatalf("rebuilt lock has no current schemaVersion:\n%s", rebuiltData)
 	}
 

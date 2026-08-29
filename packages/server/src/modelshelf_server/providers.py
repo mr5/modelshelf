@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import email.message
+import glob
 import json
 import os
 import re
@@ -13,7 +14,7 @@ import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
@@ -109,6 +110,125 @@ class EstimateMetadata:
 
 
 @dataclass(frozen=True)
+class SourceFile:
+    path: str
+    size: int | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"path": self.path}
+        if self.size is not None:
+            result["size"] = self.size
+        return result
+
+
+@dataclass(frozen=True)
+class GgufVariant:
+    label: str
+    files: tuple[SourceFile, ...]
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        return tuple(file.path for file in self.files)
+
+    @property
+    def total_size(self) -> int | None:
+        if any(file.size is None for file in self.files):
+            return None
+        return sum(file.size or 0 for file in self.files)
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "label": self.label,
+            "paths": list(self.paths),
+            "fileCount": len(self.files),
+        }
+        if self.total_size is not None:
+            result["totalSize"] = self.total_size
+        return result
+
+
+_GGUF_SPLIT_PATTERN = re.compile(
+    r"^(?P<prefix>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})(?P<suffix>\.gguf)$",
+    re.IGNORECASE,
+)
+_GGUF_DEPENDENCY_MARKERS = (
+    "adapter",
+    "draft",
+    "lora",
+    "mmproj",
+    "mtp",
+    "projector",
+)
+_OTHER_WEIGHT_SUFFIXES = (
+    ".bin",
+    ".ckpt",
+    ".engine",
+    ".h5",
+    ".onnx",
+    ".pt",
+    ".pth",
+    ".safetensors",
+    ".tflite",
+)
+
+
+def discover_gguf_variants(files: tuple[SourceFile, ...]) -> tuple[GgufVariant, ...]:
+    """Return only unambiguous, independently downloadable GGUF weight groups."""
+    if not files or len(files) > 5_000:
+        return ()
+    lowered_paths = tuple(file.path.casefold() for file in files)
+    if any(path.endswith(_OTHER_WEIGHT_SUFFIXES) for path in lowered_paths):
+        return ()
+
+    gguf_files = tuple(
+        file
+        for file in files
+        if file.path.casefold().endswith(".gguf")
+        and not any(
+            marker in PurePath(file.path).name.casefold() for marker in _GGUF_DEPENDENCY_MARKERS
+        )
+    )
+    if not gguf_files:
+        return ()
+
+    singles: list[GgufVariant] = []
+    split_groups: dict[str, list[tuple[int, int, SourceFile]]] = {}
+    labels: dict[str, str] = {}
+    for file in gguf_files:
+        match = _GGUF_SPLIT_PATTERN.match(file.path)
+        if match is None:
+            singles.append(GgufVariant(file.path, (file,)))
+            continue
+        label = f"{match.group('prefix')}{match.group('suffix')}"
+        key = label.casefold()
+        labels.setdefault(key, label)
+        split_groups.setdefault(key, []).append(
+            (int(match.group("index")), int(match.group("total")), file)
+        )
+
+    variants = singles
+    for key, members in split_groups.items():
+        totals = {total for _index, total, _file in members}
+        if len(totals) != 1:
+            return ()
+        total = totals.pop()
+        indexes = [index for index, _total, _file in members]
+        if total < 1 or sorted(indexes) != list(range(1, total + 1)):
+            return ()
+        variants.append(
+            GgufVariant(
+                labels[key],
+                tuple(file for _index, _total, file in sorted(members)),
+            )
+        )
+
+    variant_labels = [variant.label.casefold() for variant in variants]
+    if len(variant_labels) != len(set(variant_labels)):
+        return ()
+    return tuple(sorted(variants, key=lambda variant: variant.label.casefold()))
+
+
+@dataclass(frozen=True)
 class DownloadEstimate:
     provider: Provider
     source_id: str
@@ -118,6 +238,7 @@ class DownloadEstimate:
     file_count: int | None
     hub_url: str | None = None
     metadata: tuple[EstimateMetadata, ...] = ()
+    files: tuple[SourceFile, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -135,6 +256,22 @@ class DownloadEstimate:
             result["fileCount"] = self.file_count
         if self.hub_url:
             result["hubUrl"] = self.hub_url
+        selectable = self.provider in MODELSCOPE_PROVIDERS | {Provider.HUGGINGFACE}
+        variants = discover_gguf_variants(self.files) if selectable else ()
+        result["ggufVariantSelectionAvailable"] = bool(variants)
+        if variants:
+            result["ggufVariants"] = [variant.as_dict() for variant in variants]
+            auxiliary = [
+                file.as_dict()
+                for file in self.files
+                if file.path.casefold().endswith(".gguf")
+                and any(
+                    marker in PurePath(file.path).name.casefold()
+                    for marker in _GGUF_DEPENDENCY_MARKERS
+                )
+            ]
+            if auxiliary:
+                result["ggufAuxiliaryFiles"] = auxiliary
         return result
 
 
@@ -718,6 +855,11 @@ async def _estimate_huggingface(source_id: str, revision: str, endpoint: str) ->
             ("Library", getattr(info, "library_name", None)),
             ("Last modified", getattr(info, "last_modified", None)),
         ),
+        tuple(
+            SourceFile(str(getattr(item, "rfilename", "")), getattr(item, "size", None))
+            for item in siblings
+            if getattr(item, "rfilename", None)
+        ),
     )
 
 
@@ -731,7 +873,7 @@ async def _estimate_modelscope(
     resolved = await _resolve_modelscope_revision(
         provider, source_id, revision, endpoint=endpoint, token=token
     )
-    total_size, file_count = await asyncio.to_thread(
+    total_size, files = await asyncio.to_thread(
         _estimate_modelscope_git,
         source_id,
         revision,
@@ -746,8 +888,10 @@ async def _estimate_modelscope(
         revision,
         resolved,
         total_size,
-        file_count,
+        len(files),
         f"{official_endpoint}/models/{source_id}",
+        (),
+        files,
     )
 
 
@@ -962,6 +1106,11 @@ def _estimate_from_dict(data: dict[str, Any]) -> DownloadEstimate:
         for item in data.get("metadata", [])
         if isinstance(item, dict) and "label" in item and "value" in item
     )
+    files = tuple(
+        SourceFile(str(item["path"]), item.get("size"))
+        for item in data.get("files", [])
+        if isinstance(item, dict) and item.get("path")
+    )
     return DownloadEstimate(
         Provider(data["provider"]),
         str(data["sourceId"]),
@@ -971,6 +1120,7 @@ def _estimate_from_dict(data: dict[str, Any]) -> DownloadEstimate:
         data.get("fileCount"),
         data.get("hubUrl"),
         metadata,
+        files,
     )
 
 
@@ -1043,6 +1193,7 @@ async def _isolated_download(
     mirror_url: str | None,
     direct: bool,
     expected_resolved_revision: str | None,
+    selected_paths: list[str] | None,
 ) -> ProviderResult:
     payload = {
         "operation": "download",
@@ -1057,6 +1208,7 @@ async def _isolated_download(
         "disableMirror": disable_mirror,
         "mirrorUrl": mirror_url,
         "expectedResolvedRevision": expected_resolved_revision,
+        "selectedPaths": selected_paths,
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -1188,6 +1340,7 @@ async def download_huggingface(
     destination: Path,
     progress: Progress,
     endpoint: str,
+    selected_paths: list[str] | None = None,
 ) -> ProviderResult:
     cache = destination.parent / ".huggingface-cache"
     os.environ["HF_HOME"] = str(cache)
@@ -1215,6 +1368,9 @@ async def download_huggingface(
             cache_dir=cache / "hub",
             token=token,
             endpoint=endpoint,
+            allow_patterns=[glob.escape(path) for path in selected_paths]
+            if selected_paths
+            else None,
         )
 
     try:
@@ -1234,6 +1390,7 @@ async def download_modelscope(
     endpoint: str,
     token: str | None,
     expected_resolved_revision: str | None = None,
+    selected_paths: list[str] | None = None,
 ) -> ProviderResult:
     resolved = await _resolve_modelscope_revision(
         provider, source_id, revision, endpoint=endpoint, token=token
@@ -1243,16 +1400,68 @@ async def download_modelscope(
             "ModelScope requested revision changed after preflight: "
             f"expected {expected_resolved_revision}, got {resolved}"
         )
-    await _download_modelscope_git(
-        source_id,
-        revision,
-        resolved,
-        destination,
-        progress,
-        endpoint,
-        token,
-    )
+    if selected_paths:
+        await _download_modelscope_selected(
+            source_id,
+            revision,
+            destination,
+            progress,
+            endpoint,
+            token,
+            selected_paths,
+        )
+        resolved_after_download = await _resolve_modelscope_revision(
+            provider, source_id, revision, endpoint=endpoint, token=token
+        )
+        if resolved_after_download != resolved:
+            raise RuntimeError(
+                "ModelScope requested revision changed during the selected-file download: "
+                f"expected {resolved}, got {resolved_after_download}"
+            )
+    else:
+        await _download_modelscope_git(
+            source_id,
+            revision,
+            resolved,
+            destination,
+            progress,
+            endpoint,
+            token,
+        )
     return ProviderResult(resolved_revision=resolved)
+
+
+async def _download_modelscope_selected(
+    source_id: str,
+    revision: str,
+    destination: Path,
+    progress: Progress,
+    endpoint: str,
+    token: str | None,
+    selected_paths: list[str],
+) -> None:
+    try:
+        from modelscope_hub.compat import snapshot_download
+    except ImportError as error:
+        raise _optional_import_error("ModelScope", "modelscope-hub", error) from error
+    cache = destination.parent / ".modelscope-cache"
+
+    def operation() -> str:
+        return snapshot_download(
+            repo_id=source_id,
+            repo_type="model",
+            revision=revision,
+            local_dir=str(destination),
+            cache_dir=str(cache),
+            allow_patterns=[glob.escape(path) for path in selected_paths],
+            token=token,
+            endpoint=endpoint,
+        )
+
+    try:
+        await _blocking_download(operation, destination, progress)
+    finally:
+        shutil.rmtree(cache, ignore_errors=True)
 
 
 async def _download_modelscope_git(
@@ -1427,7 +1636,7 @@ def _estimate_modelscope_git(
     resolved_revision: str,
     endpoint: str,
     token: str | None,
-) -> tuple[int, int]:
+) -> tuple[int, tuple[SourceFile, ...]]:
     with tempfile.TemporaryDirectory(prefix="modelshelf-modelscope-metadata-") as directory:
         destination = Path(directory) / "repository"
         _prepare_modelscope_git_checkout(
@@ -1439,12 +1648,19 @@ def _estimate_modelscope_git(
             token,
             skip_lfs=True,
         )
-        files = [
+        paths = [
             path
             for path in destination.rglob("*")
             if (path.is_file() or path.is_symlink()) and ".git" not in path.parts
         ]
-        return sum(_modelscope_git_file_size(path) for path in files), len(files)
+        files = tuple(
+            SourceFile(
+                path.relative_to(destination).as_posix(),
+                _modelscope_git_file_size(path),
+            )
+            for path in paths
+        )
+        return sum(file.size or 0 for file in files), files
 
 
 def _parse_ls_remote(output: str, revision: str) -> str:
@@ -1683,6 +1899,7 @@ async def run_provider(
     mirror_url: str | None = None,
     disable_proxy: bool = False,
     expected_resolved_revision: str | None = None,
+    selected_paths: list[str] | None = None,
     _isolated: bool = False,
 ) -> ProviderResult:
     if provider in ISOLATED_DOWNLOAD_PROVIDERS and not _isolated:
@@ -1700,11 +1917,14 @@ async def run_provider(
             mirror_url=mirror_url,
             direct=disable_proxy,
             expected_resolved_revision=expected_resolved_revision,
+            selected_paths=selected_paths,
         )
     if provider is Provider.HUGGINGFACE:
         endpoint = _provider_endpoint(provider, mirror_url or huggingface_mirror, disable_mirror)
         assert endpoint is not None
-        return await download_huggingface(source_id, revision, destination, progress, endpoint)
+        return await download_huggingface(
+            source_id, revision, destination, progress, endpoint, selected_paths
+        )
     if provider in MODELSCOPE_PROVIDERS:
         endpoint = _provider_endpoint(
             provider,
@@ -1721,6 +1941,7 @@ async def run_provider(
             endpoint,
             _modelscope_token(provider),
             expected_resolved_revision,
+            selected_paths,
         )
     if provider is Provider.KAGGLE:
         return await download_kaggle(source_id, revision, destination, progress)

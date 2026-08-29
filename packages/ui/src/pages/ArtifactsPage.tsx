@@ -69,26 +69,35 @@ function shellArgument(value: string): string {
 }
 
 function addCommand(item: ArtifactSummary): string {
-  return [
+  const command = [
     "modelshelf add",
     shellArgument(item.provider),
     shellArgument(item.sourceId),
     "--revision",
     shellArgument(item.resolvedRevision),
+  ];
+  for (const path of item.selectedPaths ?? []) {
+    command.push("--file", shellArgument(path));
+  }
+  command.push(
     "--alias",
     shellArgument(artifactAlias(item)),
-  ].join(" ");
+  );
+  return command.join(" ");
 }
 
 function modelConfig(item: ArtifactSummary): string {
   const quote = (value: string) => JSON.stringify(value);
-  return [
+  const lines = [
     `alias: ${quote(artifactAlias(item))}`,
     `provider: ${quote(item.provider)}`,
     `id: ${quote(item.sourceId)}`,
     `revision: ${quote(item.resolvedRevision)}`,
-    "",
-  ].join("\n");
+  ];
+  if (item.selectedPaths) {
+    lines.push("files:", ...item.selectedPaths.map((path) => `  - ${quote(path)}`));
+  }
+  return [...lines, ""].join("\n");
 }
 
 export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
@@ -201,7 +210,7 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
         {sourceUrl
           ? <a className="artifact-source" href={sourceUrl} target="_blank" rel="noreferrer">{item.sourceId} <span aria-hidden="true">↗</span></a>
           : <span className="artifact-source">{item.sourceId}</span>}
-        <dl><div><dt>Source</dt><dd className="artifact-source-meta"><SourceLogo provider={item.provider} /><span>{providerLabel(item.provider)}</span></dd></div><div><dt>Resolved revision</dt><dd className="mono truncate" title={item.resolvedRevision}>{item.resolvedRevision}</dd></div><div><dt>Content</dt><dd>{item.fileCount.toLocaleString()} files · {formatBytes(item.totalSize)}</dd></div><div><dt>Added to shelf</dt><dd>{new Date(item.createdAt).toLocaleString()}</dd></div></dl>
+        <dl><div><dt>Source</dt><dd className="artifact-source-meta"><SourceLogo provider={item.provider} /><span>{providerLabel(item.provider)}</span></dd></div><div><dt>Resolved revision</dt><dd className="mono truncate" title={item.resolvedRevision}>{item.resolvedRevision}</dd></div><div><dt>Content</dt><dd>{item.fileCount.toLocaleString()} files · {formatBytes(item.totalSize)}{item.selectedPaths ? " · GGUF variant" : ""}</dd></div><div><dt>Added to shelf</dt><dd>{new Date(item.createdAt).toLocaleString()}</dd></div></dl>
         <div className="artifact-actions">
           <div className="artifact-command"><code title={command}>{command}</code><button className="ghost" aria-label={`Copy modelshelf add command for ${item.name}`} onClick={() => void copyText(item, "command", command)}>{commandCopied ? "Copied" : "Copy"}</button></div>
           <button className="ghost artifact-action" onClick={() => void copyText(item, "config", modelConfig(item))} title="Copy this model entry, pinned to the resolved revision">{configCopied ? "Copied" : "Copy model config"}</button>

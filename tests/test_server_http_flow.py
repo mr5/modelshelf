@@ -88,6 +88,80 @@ def test_queued_and_paused_tasks_can_be_reordered_through_the_api(
     assert "queue changed" in stale.json()["detail"]
 
 
+def test_manifest_verification_does_not_block_task_or_health_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = tmp_path / "storage"
+    catalog = Catalog(storage)
+    catalog.initialize()
+    store = TaskStore(catalog.jobs_root)
+    task = store.create(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        resolved_revision="a" * 40,
+        total_bytes=len(b"model"),
+        disable_mirror=False,
+        disable_proxy=False,
+        queue_position=0,
+    )
+    verification_started = threading.Event()
+    release_verification = threading.Event()
+    original_inventory = task_module.inventory
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: object,
+        **_options: object,
+    ) -> ProviderResult:
+        (destination / "model.bin").write_bytes(b"model")
+        return ProviderResult(resolved_revision="a" * 40)
+
+    def blocking_inventory(*args: object, **kwargs: object) -> list[object]:
+        verification_started.set()
+        assert release_verification.wait(timeout=2)
+        return original_inventory(*args, **kwargs)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    monkeypatch.setattr(task_module, "inventory", blocking_inventory)
+    settings = Settings(
+        storage_root=storage,
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    headers = {"Authorization": "Bearer write-token"}
+    try:
+        with TestClient(create_app(settings)) as client:
+            assert verification_started.wait(timeout=2)
+            started_at = time.monotonic()
+            info = client.get("/api/v1/info")
+            detail = client.get(f"/api/v1/tasks/{task.id}", headers=headers)
+            elapsed = time.monotonic() - started_at
+
+            assert info.status_code == 200
+            assert detail.status_code == 200
+            assert elapsed < 1
+            assert detail.json()["status"] == "verifying"
+            assert detail.json()["instantaneousBytesPerSecond"] == 0
+            assert detail.json()["verificationDetail"] == (
+                "Hashing files for the artifact manifest"
+            )
+
+            release_verification.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                completed = client.get(f"/api/v1/tasks/{task.id}", headers=headers)
+                if completed.json()["status"] == "completed":
+                    break
+                time.sleep(0.02)
+            assert completed.json()["status"] == "completed"
+    finally:
+        release_verification.set()
+
+
 def test_delete_endpoints_require_write_access_and_remove_owned_data(tmp_path: Path) -> None:
     storage = tmp_path / "storage"
     catalog = Catalog(storage)

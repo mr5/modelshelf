@@ -28,6 +28,17 @@ custom paths are symlinks. Multiple references share one canonical copy.
 ModelScope CN and AI are independent sources with fixed official endpoints, separate optional
 mirrors, and separate site-scoped tokens. A token is never sent to the other site.
 
+## Ingestion verification
+
+Manifest SHA-256 inventory runs outside the HTTP event loop. Verification is globally bounded to
+one artifact at a time and hashes two files concurrently, keeping API and health endpoints
+responsive without creating unbounded disk concurrency. Progress, disk throughput, and ETA are
+reported separately from download metrics.
+
+For ModelScope Git LFS downloads, pointer OIDs are captured before `git lfs pull`. The manifest
+hash pass compares the published worktree directly with those expected SHA-256 values. This keeps
+upstream integrity checking while avoiding a separate `git lfs fsck` content scan.
+
 ## Read authentication
 
 Artifact browsing, catalog reads, server information, and client distribution are public by

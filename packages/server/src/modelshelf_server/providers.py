@@ -38,6 +38,7 @@ class ProviderResult:
     source_url: str | None = None
     downloaded_file: str | None = None
     content_disposition: str | None = None
+    expected_sha256: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -1292,6 +1293,7 @@ async def _isolated_download(
         source_url=result.get("sourceUrl"),
         downloaded_file=result.get("downloadedFile"),
         content_disposition=result.get("contentDisposition"),
+        expected_sha256=result.get("expectedSha256"),
     )
 
 
@@ -1424,6 +1426,7 @@ async def download_modelscope(
             "ModelScope requested revision changed after preflight: "
             f"expected {expected_resolved_revision}, got {resolved}"
         )
+    expected_sha256: dict[str, str] | None = None
     if selected_paths:
         await _download_modelscope_selected(
             source_id,
@@ -1443,7 +1446,7 @@ async def download_modelscope(
                 f"expected {resolved}, got {resolved_after_download}"
             )
     else:
-        await _download_modelscope_git(
+        expected_sha256 = await _download_modelscope_git(
             source_id,
             revision,
             resolved,
@@ -1452,7 +1455,7 @@ async def download_modelscope(
             endpoint,
             token,
         )
-    return ProviderResult(resolved_revision=resolved)
+    return ProviderResult(resolved_revision=resolved, expected_sha256=expected_sha256)
 
 
 async def _download_modelscope_selected(
@@ -1496,8 +1499,9 @@ async def _download_modelscope_git(
     progress: Progress,
     endpoint: str,
     token: str | None,
-) -> None:
+) -> dict[str, str]:
     lfs_paths: set[Path] = set()
+    expected_sha256: dict[str, str] = {}
 
     def operation() -> str:
         lfs = subprocess.run(
@@ -1518,14 +1522,17 @@ async def _download_modelscope_git(
             token,
             skip_lfs=True,
         )
-        lfs_paths.update(
-            path.relative_to(destination)
-            for path in destination.rglob("*")
-            if path.is_file() and _modelscope_lfs_pointer_size(path) is not None
-        )
+        for path in destination.rglob("*"):
+            if not path.is_file():
+                continue
+            pointer = _modelscope_lfs_pointer(path)
+            if pointer is None:
+                continue
+            relative = path.relative_to(destination)
+            lfs_paths.add(relative)
+            expected_sha256[relative.as_posix()] = pointer[0]
         environment.pop("GIT_LFS_SKIP_SMUDGE", None)
         _checked_modelscope_git(["git", "-C", str(destination), "lfs", "pull"], environment)
-        _checked_modelscope_git(["git", "-C", str(destination), "lfs", "fsck"], environment)
         shutil.rmtree(destination / ".git")
         return str(destination)
 
@@ -1550,6 +1557,7 @@ async def _download_modelscope_git(
         return worktree_size + lfs_size
 
     await _blocking_download(operation, destination, progress, download_size)
+    return expected_sha256
 
 
 def _modelscope_git_environment(token: str | None, *, skip_lfs: bool) -> dict[str, str]:
@@ -1637,15 +1645,23 @@ def _prepare_modelscope_git_checkout(
     raise errors[-1]
 
 
-def _modelscope_lfs_pointer_size(path: Path) -> int | None:
+def _modelscope_lfs_pointer(path: Path) -> tuple[str, int] | None:
     if path.is_symlink():
         return None
     with path.open("rb") as stream:
         prefix = stream.read(512)
     if not prefix.startswith(b"version https://git-lfs.github.com/spec/v1\n"):
         return None
-    match = re.search(rb"(?:^|\n)size (\d+)(?:\n|$)", prefix)
-    return int(match.group(1)) if match else None
+    oid = re.search(rb"(?:^|\n)oid sha256:([a-f0-9]{64})(?:\n|$)", prefix)
+    size = re.search(rb"(?:^|\n)size (\d+)(?:\n|$)", prefix)
+    if oid is None or size is None:
+        return None
+    return oid.group(1).decode("ascii"), int(size.group(1))
+
+
+def _modelscope_lfs_pointer_size(path: Path) -> int | None:
+    pointer = _modelscope_lfs_pointer(path)
+    return pointer[1] if pointer is not None else None
 
 
 def _modelscope_git_file_size(path: Path) -> int:

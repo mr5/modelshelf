@@ -8,7 +8,7 @@ COPY packages/ui packages/ui
 RUN pnpm --filter @modelshelf/ui build
 
 FROM golang:1.25-bookworm AS client
-ARG MODELSHELF_VERSION=0.1.0-beta.10
+ARG MODELSHELF_VERSION=0.1.0-beta.11
 ARG MODELSHELF_COMMIT=unknown
 WORKDIR /src
 COPY packages/client/go.mod packages/client/go.sum packages/client/

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -189,7 +190,7 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     loaded = manager.store.get(task_id)
     assert loaded is not None
     assert loaded.mirror_url is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 4
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 5
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 1
@@ -199,10 +200,21 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     assert migrated is not None
     assert migrated.mirror_url is None
     assert migrated.scheduled_at is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 4
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 5
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
-    document["schemaVersion"] = 5
+    document["schemaVersion"] = 4
+    document.pop("verificationBytesCompleted", None)
+    document.pop("verificationDetail", None)
+    task_path.write_text(json.dumps(document), encoding="utf-8")
+    migrated = manager.store.get(task_id)
+    assert migrated is not None
+    assert migrated.verification_bytes_completed == 0
+    assert migrated.verification_detail is None
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 5
+
+    document = json.loads(task_path.read_text(encoding="utf-8"))
+    document["schemaVersion"] = 6
     task_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
         manager.store.list()
@@ -579,6 +591,48 @@ def test_selected_file_task_rejects_unexpected_provider_output(
     asyncio.run(exercise())
 
 
+def test_provider_source_hash_is_checked_during_manifest_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: Progress,
+        **_options: object,
+    ) -> ProviderResult:
+        (destination / "model.bin").write_bytes(b"model")
+        return ProviderResult(
+            resolved_revision="8" * 40,
+            expected_sha256={"model.bin": "0" * 64},
+        )
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.MODELSCOPE_CN,
+                "owner/model",
+                "master",
+                resolved_revision="8" * 40,
+                total_bytes=len(b"model"),
+            )
+            await asyncio.wait_for(manager.queue.join(), timeout=2)
+            failed = manager.store.get(task.id)
+            assert failed is not None and failed.status is TaskStatus.FAILED
+            assert "source SHA-256 mismatch: model.bin" in (failed.error or "")
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
 def test_scheduled_task_can_start_immediately(tmp_path: Path) -> None:
     catalog = Catalog(tmp_path / "storage")
     catalog.initialize()
@@ -908,6 +962,43 @@ def test_average_speed_uses_only_bytes_measured_after_resume(tmp_path: Path) -> 
     assert asyncio.run(exercise()) == 150
 
 
+def test_verification_progress_has_separate_rate_and_eta(tmp_path: Path) -> None:
+    moments = iter((100.0, 110.0))
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None, clock=lambda: next(moments))
+
+    async def exercise() -> tuple[int, int, int | None, float, float, int | None]:
+        created = await manager.create(
+            Provider.HUGGINGFACE,
+            "owner/model",
+            "main",
+            total_bytes=1_000,
+        )
+        verifying = manager.store.update(
+            created.id,
+            {
+                "status": TaskStatus.VERIFYING,
+                "progress": 92,
+                "verification_total_bytes": 1_000,
+            },
+        )
+        manager._start_verification_metrics(verifying)
+        await manager._verification_progress(created.id, 500, 1_000)
+        updated = manager.store.get(created.id)
+        assert updated is not None
+        return (
+            updated.progress,
+            updated.verification_bytes_completed,
+            updated.verification_total_bytes,
+            updated.verification_instantaneous_bytes_per_second,
+            updated.verification_average_bytes_per_second,
+            updated.verification_eta_seconds,
+        )
+
+    assert asyncio.run(exercise()) == (95, 500, 1_000, 50, 50, 10)
+
+
 def test_active_task_can_pause_and_resume_from_preserved_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -968,6 +1059,73 @@ def test_active_task_can_pause_and_resume_from_preserved_stage(
     asyncio.run(exercise())
     assert attempts == 2
     assert resumed_from_stage is True
+
+
+def test_verification_can_pause_and_resume_without_downloading_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verification_started = threading.Event()
+    provider_attempts = 0
+    inventory_attempts = 0
+    original_inventory = task_module.inventory
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: Progress,
+        **_options: object,
+    ) -> ProviderResult:
+        nonlocal provider_attempts
+        provider_attempts += 1
+        (destination / "model.bin").write_bytes(b"complete")
+        return ProviderResult(resolved_revision="a" * 40)
+
+    def pausable_inventory(*args: object, **kwargs: object) -> list[object]:
+        nonlocal inventory_attempts
+        inventory_attempts += 1
+        if inventory_attempts == 1:
+            verification_started.set()
+            cancelled = kwargs["cancelled"]
+            assert isinstance(cancelled, threading.Event)
+            cancelled.wait(timeout=2)
+            raise RuntimeError("verification cancelled")
+        return original_inventory(*args, **kwargs)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    monkeypatch.setattr(task_module, "inventory", pausable_inventory)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.MODELSCOPE_CN,
+                "owner/model",
+                "master",
+                resolved_revision="a" * 40,
+                total_bytes=len(b"complete"),
+            )
+            assert await asyncio.to_thread(verification_started.wait, 2)
+            current = manager.store.get(task.id)
+            assert current is not None and current.status is TaskStatus.VERIFYING
+
+            paused = await manager.pause(task.id)
+            assert paused.status is TaskStatus.PAUSED
+            resumed = await manager.resume(task.id)
+            assert resumed.status is TaskStatus.QUEUED
+            await asyncio.wait_for(manager.queue.join(), timeout=2)
+            completed = manager.store.get(task.id)
+            assert completed is not None and completed.status is TaskStatus.COMPLETED
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+    assert provider_attempts == 1
+    assert inventory_attempts == 2
 
 
 def test_cancel_active_task_stops_work_and_removes_stage(

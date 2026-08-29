@@ -105,10 +105,13 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
     return <ModalFrame title="Loading task…" onClose={close}><div className="modal-loading">Reading the latest task state…</div></ModalFrame>;
   }
 
-  const canPause = task.status === "queued" || task.status === "resolving" || task.status === "downloading";
+  const isVerifying = task.status === "verifying";
+  const canPause = task.status === "queued" || task.status === "resolving" || task.status === "downloading" || isVerifying;
   const canCancel = canPause || task.status === "scheduled" || task.status === "paused" || task.status === "awaiting_confirmation";
   const canDelete = task.status === "completed" || task.status === "failed" || task.status === "cancelled";
-  const eta = task.status === "scheduled" && task.scheduledAt
+  const eta = isVerifying
+    ? formatDuration(task.verificationEtaSeconds)
+    : task.status === "scheduled" && task.scheduledAt
     ? `Starts ${new Date(task.scheduledAt).toLocaleString()}`
     : task.status === "paused"
     ? "Paused"
@@ -120,6 +123,14 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
   const transferred = task.totalBytes
     ? `${formatBytes(task.bytesDownloaded)} / ${formatBytes(task.totalBytes)}`
     : `${formatBytes(task.bytesDownloaded)} transferred`;
+  const verificationCompleted = task.verificationBytesCompleted ?? 0;
+  const verificationTotal = task.verificationTotalBytes;
+  const activityLabel = isVerifying ? (task.verificationDetail ?? "Verifying") : "Transferred";
+  const activityValue = isVerifying
+    ? verificationTotal === undefined
+      ? (verificationCompleted > 0 ? `${formatBytes(verificationCompleted)} verified` : "In progress")
+      : `${formatBytes(verificationCompleted)} / ${formatBytes(verificationTotal)}`
+    : transferred;
   const route = task.mirrorUrl || task.disableMirror || task.disableProxy ? [
     task.mirrorUrl ? `Temporary mirror: ${task.mirrorUrl}` : null,
     task.disableMirror ? "Mirror bypassed" : null,
@@ -159,14 +170,14 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
     </>}
   >
     <section className="task-progress-card">
-      <div className="task-progress-summary"><span>Transferred</span><strong>{transferred}</strong></div>
+      <div className="task-progress-summary"><span>{activityLabel}</span><strong>{activityValue}</strong></div>
       <div className="task-progress-row">
-        <div className="progress big" aria-label={`${task.progress}% complete`}><i style={{ width: `${task.progress}%` }} /></div>
+        <div className={`progress big ${isVerifying && verificationTotal === undefined ? "indeterminate" : ""}`} aria-label={`${task.progress}% complete`}><i style={{ width: `${task.progress}%` }} /></div>
         <strong className="task-progress-percent">{task.progress}%</strong>
       </div>
       <div className="task-metrics">
-        <Metric label="Instant speed" value={formatRate(task.instantaneousBytesPerSecond)} />
-        <Metric label="Average speed" value={formatRate(task.averageBytesPerSecond)} />
+        <Metric label={isVerifying ? "Verification speed" : "Instant speed"} value={formatRate(isVerifying ? task.verificationInstantaneousBytesPerSecond : task.instantaneousBytesPerSecond)} />
+        <Metric label={isVerifying ? "Average verification speed" : "Average speed"} value={formatRate(isVerifying ? task.verificationAverageBytesPerSecond : task.averageBytesPerSecond)} />
         <Metric label="ETA" value={eta} />
       </div>
     </section>

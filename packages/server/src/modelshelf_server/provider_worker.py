@@ -70,6 +70,7 @@ async def _main(payload: dict[str, Any]) -> None:
                 "sourceUrl": result.source_url,
                 "downloadedFile": result.downloaded_file,
                 "contentDisposition": result.content_disposition,
+                "expectedSha256": result.expected_sha256,
             },
         }
     )

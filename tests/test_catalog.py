@@ -1,7 +1,10 @@
+import hashlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
+import modelshelf_core.catalog as catalog_module
 import pytest
 from modelshelf_core import (
     Catalog,
@@ -10,7 +13,7 @@ from modelshelf_core import (
     SourceReference,
     VerificationError,
 )
-from modelshelf_core.catalog import verify_artifact
+from modelshelf_core.catalog import inventory, verify_artifact
 from modelshelf_core.identity import (
     artifact_identity,
     artifact_identity_from_relative_path,
@@ -33,6 +36,65 @@ def source(revision: str = "abc123") -> SourceReference:
         requested_revision="main",
         resolved_revision=revision,
     )
+
+
+def test_parallel_inventory_reports_byte_progress_and_checks_expected_hashes(
+    tmp_path: Path,
+) -> None:
+    first = b"a" * (1024 * 1024 + 17)
+    second = b"b" * (1024 * 1024 + 29)
+    (tmp_path / "first.bin").write_bytes(first)
+    (tmp_path / "second.bin").write_bytes(second)
+    updates: list[tuple[int, int]] = []
+
+    files = inventory(
+        tmp_path,
+        workers=2,
+        progress=lambda completed, total: updates.append((completed, total)),
+        expected_sha256={
+            "first.bin": hashlib.sha256(first).hexdigest(),
+            "second.bin": hashlib.sha256(second).hexdigest(),
+        },
+    )
+
+    total = len(first) + len(second)
+    assert [file.path for file in files] == ["first.bin", "second.bin"]
+    assert updates[0] == (0, total)
+    assert updates[-1] == (total, total)
+    assert all(left[0] <= right[0] for left, right in zip(updates, updates[1:], strict=False))
+
+    with pytest.raises(VerificationError, match="source SHA-256 mismatch: first.bin"):
+        inventory(tmp_path, workers=2, expected_sha256={"first.bin": "0" * 64})
+
+
+def test_parallel_inventory_uses_two_file_hash_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "first.bin").write_bytes(b"first")
+    (tmp_path / "second.bin").write_bytes(b"second")
+    barrier = threading.Barrier(2)
+    worker_names: set[str] = set()
+
+    def synchronized_hash(
+        path: Path,
+        *,
+        progress: object = None,
+        cancelled: object = None,
+    ) -> str:
+        del cancelled
+        worker_names.add(threading.current_thread().name)
+        barrier.wait(timeout=1)
+        payload = path.read_bytes()
+        if callable(progress):
+            progress(len(payload))
+        return hashlib.sha256(payload).hexdigest()
+
+    monkeypatch.setattr(catalog_module, "sha256_file", synchronized_hash)
+
+    files = inventory(tmp_path, workers=2)
+
+    assert len(files) == 2
+    assert len(worker_names) == 2
 
 
 def test_manifest_publish_and_verify(tmp_path: Path) -> None:

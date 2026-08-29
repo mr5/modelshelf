@@ -7,7 +7,9 @@ import os
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,16 +54,34 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def sha256_file(path: Path) -> str:
+def sha256_file(
+    path: Path,
+    *,
+    progress: Callable[[int], None] | None = None,
+    cancelled: threading.Event | None = None,
+) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while block := stream.read(1024 * 1024):
+            if cancelled is not None and cancelled.is_set():
+                raise VerificationError("verification cancelled")
             digest.update(block)
+            if progress is not None:
+                progress(len(block))
     return digest.hexdigest()
 
 
-def inventory(root: Path) -> list[FileEntry]:
-    result: list[FileEntry] = []
+def inventory(
+    root: Path,
+    *,
+    workers: int = 1,
+    progress: Callable[[int, int], None] | None = None,
+    expected_sha256: Mapping[str, str] | None = None,
+    cancelled: threading.Event | None = None,
+) -> list[FileEntry]:
+    if workers < 1:
+        raise ValueError("inventory workers must be at least 1")
+    discovered: list[tuple[str, Path, int]] = []
     for current, directories, files in os.walk(root, followlinks=False):
         for name in directories:
             absolute = Path(current) / name
@@ -73,9 +93,60 @@ def inventory(root: Path) -> list[FileEntry]:
             if absolute.is_symlink():
                 raise VerificationError(f"symbolic links are not allowed: {absolute}")
             relative = absolute.relative_to(root).as_posix()
-            result.append(
-                FileEntry(path=relative, size=absolute.stat().st_size, sha256=sha256_file(absolute))
+            discovered.append((relative, absolute, absolute.stat().st_size))
+    discovered.sort(key=lambda item: item[0])
+
+    expected = dict(expected_sha256 or {})
+    missing = sorted(set(expected) - {relative for relative, _path, _size in discovered})
+    if missing:
+        raise VerificationError("expected source files are missing: " + ", ".join(missing[:3]))
+
+    total = sum(size for _relative, _path, size in discovered)
+    completed = 0
+    progress_lock = threading.Lock()
+    stop = cancelled or threading.Event()
+
+    def report(byte_count: int) -> None:
+        nonlocal completed
+        with progress_lock:
+            completed += byte_count
+            current = completed
+        if progress is not None:
+            progress(current, total)
+
+    def hash_entry(item: tuple[str, Path, int]) -> FileEntry:
+        relative, absolute, size = item
+        digest = sha256_file(absolute, progress=report, cancelled=stop)
+        expected_digest = expected.get(relative)
+        if expected_digest is not None and digest != expected_digest:
+            raise VerificationError(
+                f"source SHA-256 mismatch: {relative}; expected {expected_digest}, got {digest}"
             )
+        return FileEntry(path=relative, size=size, sha256=digest)
+
+    if progress is not None:
+        progress(0, total)
+    try:
+        if workers == 1 or len(discovered) < 2:
+            result = [hash_entry(item) for item in discovered]
+        else:
+            executor = ThreadPoolExecutor(
+                max_workers=min(workers, len(discovered)),
+                thread_name_prefix="modelshelf-verify",
+            )
+            try:
+                result = list(executor.map(hash_entry, discovered))
+            except BaseException:
+                stop.set()
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
+    except BaseException:
+        stop.set()
+        raise
+    if progress is not None:
+        progress(total, total)
     return result
 
 

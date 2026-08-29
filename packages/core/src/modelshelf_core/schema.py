@@ -101,6 +101,18 @@ def _task_v3_to_v4(document: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _task_v4_to_v5(document: dict[str, Any]) -> dict[str, Any]:
+    result = dict(document)
+    result.setdefault("verificationBytesCompleted", 0)
+    result.setdefault("verificationTotalBytes", None)
+    result.setdefault("verificationInstantaneousBytesPerSecond", 0)
+    result.setdefault("verificationAverageBytesPerSecond", 0)
+    result.setdefault("verificationEtaSeconds", None)
+    result.setdefault("verificationElapsedSeconds", 0)
+    result.setdefault("verificationDetail", None)
+    return result
+
+
 def _manifest_v1_to_v2(document: dict[str, Any]) -> dict[str, Any]:
     result = dict(document)
     source = dict(result.get("source") or {})
@@ -119,6 +131,7 @@ def load_task_json(raw: str) -> tuple[DownloadTask, bool]:
             1: _task_v1_to_v2,
             2: _task_v2_to_v3,
             3: _task_v3_to_v4,
+            4: _task_v4_to_v5,
         },
         missing_version=0,
     )

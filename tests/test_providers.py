@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -538,6 +539,55 @@ def test_sdk_downloads_use_a_supervised_worker(
         "direct": False,
         "mirror_url": "https://temporary-modelscope.example",
     }
+
+
+def test_modelscope_git_download_defers_lfs_integrity_to_manifest_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "artifact"
+    payload = b"model weights"
+    oid = hashlib.sha256(payload).hexdigest()
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        provider_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    def fake_checkout(*_args: object, **_kwargs: object) -> dict[str, str]:
+        destination.mkdir(parents=True)
+        (destination / ".git/lfs/objects").mkdir(parents=True)
+        (destination / "model.bin").write_text(
+            f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {len(payload)}\n",
+            encoding="utf-8",
+        )
+        return {"GIT_LFS_SKIP_SMUDGE": "1"}
+
+    def fake_git(command: list[str], _environment: dict[str, str]) -> str:
+        commands.append(command)
+        assert command[-2:] == ["lfs", "pull"]
+        (destination / "model.bin").write_bytes(payload)
+        return ""
+
+    monkeypatch.setattr(provider_module, "_prepare_modelscope_git_checkout", fake_checkout)
+    monkeypatch.setattr(provider_module, "_checked_modelscope_git", fake_git)
+
+    expected = asyncio.run(
+        provider_module._download_modelscope_git(
+            "owner/model",
+            "master",
+            "a" * 40,
+            destination,
+            lambda _downloaded, _total: asyncio.sleep(0),
+            "https://modelscope.test",
+            None,
+        )
+    )
+
+    assert expected == {"model.bin": oid}
+    assert len(commands) == 1
+    assert not (destination / ".git").exists()
 
 
 def test_kaggle_latest_is_resolved_from_official_cache_path(

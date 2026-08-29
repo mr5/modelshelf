@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import math
 import shutil
+import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -17,6 +19,7 @@ from modelshelf_core import (
     TASK_SCHEMA_VERSION,
     Catalog,
     DownloadTask,
+    FileEntry,
     Provider,
     SourceReference,
     TaskStatus,
@@ -26,7 +29,10 @@ from modelshelf_core.identity import artifact_identity
 from modelshelf_core.schema import load_task_json
 
 from .archive import extract_archive, infer_metadata
-from .providers import provider_failure_detail, run_provider
+from .providers import ProviderResult, provider_failure_detail, run_provider
+
+_PROVIDER_RESULT_SCHEMA_VERSION = 1
+_VERIFICATION_WORKERS = 2
 
 
 @dataclass(frozen=True)
@@ -229,11 +235,17 @@ class TaskManager:
         self._create_lock = asyncio.Lock()
         self._update_lock = asyncio.Lock()
         self._artifact_lock = asyncio.Lock()
+        self._verification_slot = asyncio.Lock()
         self._progress_written: dict[str, float] = {}
         self._download_timing: dict[str, tuple[float, float]] = {}
         self._download_baselines: dict[str, tuple[int, float]] = {}
         self._progress_samples: dict[str, tuple[float, int]] = {}
         self._speed_ema: dict[str, float] = {}
+        self._verification_written: dict[str, float] = {}
+        self._verification_timing: dict[str, tuple[float, float]] = {}
+        self._verification_baselines: dict[str, tuple[int, float]] = {}
+        self._verification_samples: dict[str, tuple[float, int]] = {}
+        self._verification_speed_ema: dict[str, float] = {}
         positions = [
             task.queue_position for task in self.store.list() if task.queue_position is not None
         ]
@@ -380,7 +392,12 @@ class TaskManager:
         )
         paused = await self._transition(
             task_id,
-            {TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING},
+            {
+                TaskStatus.QUEUED,
+                TaskStatus.RESOLVING,
+                TaskStatus.DOWNLOADING,
+                TaskStatus.VERIFYING,
+            },
             "paused",
             status=TaskStatus.PAUSED,
             queue_position=queue_position,
@@ -394,7 +411,8 @@ class TaskManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await active
         self._scheduler_wakeup.set()
-        return await self._stop_metrics(paused.id, timing=timing, baseline=baseline)
+        await self._stop_metrics(paused.id, timing=timing, baseline=baseline)
+        return await self._stop_verification_metrics(paused.id)
 
     async def resume(self, task_id: str, *, scheduled_at: datetime | None = None) -> DownloadTask:
         if scheduled_at is not None:
@@ -439,6 +457,7 @@ class TaskManager:
                 TaskStatus.SCHEDULED,
                 TaskStatus.RESOLVING,
                 TaskStatus.DOWNLOADING,
+                TaskStatus.VERIFYING,
                 TaskStatus.PAUSED,
                 TaskStatus.AWAITING_CONFIRMATION,
             },
@@ -459,9 +478,8 @@ class TaskManager:
             scheduled.cancel()
         self._resume_from_stage.discard(task_id)
         shutil.rmtree(self.catalog.staging_path(task_id), ignore_errors=True)
-        return await self._stop_metrics(
-            cancelled.id, timing=timing, baseline=baseline, clear_eta=True
-        )
+        await self._stop_metrics(cancelled.id, timing=timing, baseline=baseline, clear_eta=True)
+        return await self._stop_verification_metrics(cancelled.id)
 
     async def delete_task(self, task_id: str, *, delete_artifact: bool = False) -> None:
         async with self._update_lock:
@@ -772,6 +790,148 @@ class TaskManager:
             download_elapsed_seconds=elapsed,
         )
 
+    def _start_verification_metrics(self, task: DownloadTask) -> None:
+        now = self.clock()
+        self._verification_written.pop(task.id, None)
+        self._verification_timing[task.id] = (now, task.verification_elapsed_seconds)
+        self._verification_baselines[task.id] = (
+            task.verification_bytes_completed,
+            task.verification_average_bytes_per_second,
+        )
+        self._verification_samples[task.id] = (now, task.verification_bytes_completed)
+        self._verification_speed_ema.pop(task.id, None)
+
+    async def _verification_progress(self, task_id: str, completed: int, total: int) -> None:
+        now = self.clock()
+        previous = self._verification_written.get(task_id, 0)
+        if now - previous < 0.5 and completed < total:
+            return
+        self._verification_written[task_id] = now
+        last_sample = self._verification_samples.get(task_id)
+        raw_speed = 0.0
+        if last_sample is not None and now > last_sample[0]:
+            raw_speed = max(0, completed - last_sample[1]) / (now - last_sample[0])
+        previous_speed = self._verification_speed_ema.get(task_id)
+        speed = raw_speed if previous_speed is None else previous_speed * 0.7 + raw_speed * 0.3
+        self._verification_speed_ema[task_id] = speed
+        self._verification_samples[task_id] = (now, completed)
+        timing = self._verification_timing.get(task_id)
+        elapsed = timing[1] + (now - timing[0]) if timing is not None else 0.0
+        baseline = self._verification_baselines.get(task_id)
+        if timing is not None and baseline is not None:
+            previous_bytes = baseline[1] * timing[1]
+            measured_bytes = previous_bytes + max(0, completed - baseline[0])
+        else:
+            measured_bytes = completed
+        average_speed = measured_bytes / elapsed if elapsed > 0 else 0.0
+        eta_speed = speed if speed > 0 else average_speed
+        eta = (
+            math.ceil(max(0, total - completed) / eta_speed)
+            if total > completed and eta_speed > 0
+            else 0
+            if completed >= total
+            else None
+        )
+        progress = min(98, 92 + int(completed / total * 6)) if total else 98
+        await self._update(
+            task_id,
+            progress=progress,
+            verification_bytes_completed=completed,
+            verification_total_bytes=total,
+            verification_instantaneous_bytes_per_second=speed,
+            verification_average_bytes_per_second=average_speed,
+            verification_eta_seconds=eta,
+            verification_elapsed_seconds=elapsed,
+        )
+
+    async def _stop_verification_metrics(self, task_id: str) -> DownloadTask:
+        timing = self._verification_timing.pop(task_id, None)
+        self._verification_baselines.pop(task_id, None)
+        self._verification_samples.pop(task_id, None)
+        self._verification_speed_ema.pop(task_id, None)
+        task = self.store.get(task_id)
+        if task is None:
+            raise KeyError(f"unknown task {task_id}")
+        elapsed = task.verification_elapsed_seconds
+        if timing is not None:
+            elapsed = max(elapsed, timing[1] + (self.clock() - timing[0]))
+        return await self._update(
+            task_id,
+            verification_instantaneous_bytes_per_second=0,
+            verification_eta_seconds=None,
+            verification_elapsed_seconds=elapsed,
+        )
+
+    async def _verify_inventory(
+        self,
+        task_id: str,
+        root: Path,
+        *,
+        expected_sha256: Mapping[str, str] | None = None,
+    ) -> list[FileEntry]:
+        task = self.store.get(task_id)
+        detail = task.verification_detail if task is not None else None
+        if self._verification_slot.locked():
+            await self._update(task_id, verification_detail="Waiting for verification capacity")
+        async with self._verification_slot:
+            self._raise_if_stopped(task_id)
+            if detail is not None:
+                await self._update(task_id, verification_detail=detail)
+            current = self.store.get(task_id)
+            if current is None:
+                raise KeyError(f"unknown task {task_id}")
+            self._start_verification_metrics(current)
+            return await self._verify_inventory_unlocked(
+                task_id,
+                root,
+                expected_sha256=expected_sha256,
+            )
+
+    async def _verify_inventory_unlocked(
+        self,
+        task_id: str,
+        root: Path,
+        *,
+        expected_sha256: Mapping[str, str] | None = None,
+    ) -> list[FileEntry]:
+        progress_lock = threading.Lock()
+        progress_state = (0, 0)
+        cancelled = threading.Event()
+
+        def record_progress(completed: int, total: int) -> None:
+            nonlocal progress_state
+            with progress_lock:
+                progress_state = completed, total
+
+        background = asyncio.create_task(
+            asyncio.to_thread(
+                inventory,
+                root,
+                workers=_VERIFICATION_WORKERS,
+                progress=record_progress,
+                expected_sha256=expected_sha256,
+                cancelled=cancelled,
+            )
+        )
+        try:
+            while True:
+                try:
+                    files = await asyncio.wait_for(asyncio.shield(background), timeout=0.5)
+                    break
+                except TimeoutError:
+                    with progress_lock:
+                        completed, total = progress_state
+                    await self._verification_progress(task_id, completed, total)
+            with progress_lock:
+                completed, total = progress_state
+            await self._verification_progress(task_id, completed, total)
+            return files
+        except asyncio.CancelledError:
+            cancelled.set()
+            with contextlib.suppress(Exception):
+                await asyncio.shield(background)
+            raise
+
     def _raise_if_stopped(self, task_id: str) -> None:
         task = self.store.get(task_id)
         if task is not None and task.status in {TaskStatus.PAUSED, TaskStatus.CANCELLED}:
@@ -836,6 +996,68 @@ class TaskManager:
                 )
                 self._active_runs[task_id] = active
 
+    @staticmethod
+    def _provider_result_path(stage: Path) -> Path:
+        return stage / "provider-result.json"
+
+    @staticmethod
+    def _inventory_path(stage: Path) -> Path:
+        return stage / "verified-inventory.json"
+
+    def _save_provider_result(self, stage: Path, result: ProviderResult) -> None:
+        atomic_write_json(
+            self._provider_result_path(stage),
+            {
+                "schemaVersion": _PROVIDER_RESULT_SCHEMA_VERSION,
+                "resolvedRevision": result.resolved_revision,
+                "sourceUrl": result.source_url,
+                "downloadedFile": result.downloaded_file,
+                "contentDisposition": result.content_disposition,
+                "expectedSha256": result.expected_sha256,
+            },
+        )
+
+    def _load_provider_result(self, stage: Path) -> ProviderResult | None:
+        try:
+            value = json.loads(self._provider_result_path(stage).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        if not isinstance(value, dict) or value.get("schemaVersion") != 1:
+            raise RuntimeError("staged provider result has an unsupported schema")
+        expected = value.get("expectedSha256")
+        if expected is not None and not isinstance(expected, dict):
+            raise RuntimeError("staged provider result has invalid source hashes")
+        return ProviderResult(
+            resolved_revision=str(value.get("resolvedRevision") or ""),
+            source_url=value.get("sourceUrl"),
+            downloaded_file=value.get("downloadedFile"),
+            content_disposition=value.get("contentDisposition"),
+            expected_sha256={str(path): str(digest) for path, digest in expected.items()}
+            if expected is not None
+            else None,
+        )
+
+    def _save_verified_inventory(self, stage: Path, files: list[FileEntry]) -> None:
+        atomic_write_json(
+            self._inventory_path(stage),
+            {
+                "schemaVersion": 1,
+                "files": [file.model_dump(mode="json", by_alias=True) for file in files],
+            },
+        )
+
+    def _load_verified_inventory(self, stage: Path) -> list[FileEntry] | None:
+        try:
+            value = json.loads(self._inventory_path(stage).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        if not isinstance(value, dict) or value.get("schemaVersion") != 1:
+            raise RuntimeError("staged verified inventory has an unsupported schema")
+        raw_files = value.get("files")
+        if not isinstance(raw_files, list):
+            raise RuntimeError("staged verified inventory is invalid")
+        return [FileEntry.model_validate(file) for file in raw_files]
+
     async def _run(self, task_id: str) -> None:
         task = self.store.get(task_id)
         if task is None:
@@ -849,51 +1071,53 @@ class TaskManager:
             elif task.resume_from_stage:
                 task = self.store.update(task_id, {"resume_from_stage": False})
             stage.mkdir(parents=True, exist_ok=True)
-            await self._update(
-                task_id,
-                status=TaskStatus.RESOLVING,
-                progress=1,
-                queue_position=None,
-                error=None,
-            )
             download_root = (
                 stage / "download" if task.provider is Provider.HTTP else stage / "artifact"
             )
             download_root.mkdir(parents=True, exist_ok=True)
-            await self._update(task_id, status=TaskStatus.DOWNLOADING, progress=2)
-            self._start_metrics(task)
+            result = self._load_provider_result(stage) if resume_from_stage else None
+            if result is None:
+                await self._update(
+                    task_id,
+                    status=TaskStatus.RESOLVING,
+                    progress=1,
+                    queue_position=None,
+                    error=None,
+                )
+                await self._update(task_id, status=TaskStatus.DOWNLOADING, progress=2)
+                self._start_metrics(task)
 
-            async def report_progress(downloaded: int, reported_total: int | None) -> None:
-                total = task.total_bytes if task.total_bytes is not None else reported_total
-                transferred = min(downloaded, total) if total is not None else downloaded
-                await self._progress(task_id, transferred, total)
+                async def report_progress(downloaded: int, reported_total: int | None) -> None:
+                    total = task.total_bytes if task.total_bytes is not None else reported_total
+                    transferred = min(downloaded, total) if total is not None else downloaded
+                    await self._progress(task_id, transferred, total)
 
-            download_revision = task.requested_revision
-            if task.resolved_revision and task.provider is Provider.HUGGINGFACE:
-                download_revision = task.resolved_revision
-            elif (
-                task.resolved_revision
-                and task.provider is Provider.KAGGLE
-                and task.resolved_revision.startswith("version:")
-            ):
-                download_revision = task.resolved_revision.removeprefix("version:")
-            result = await run_provider(
-                task.provider,
-                task.source_id,
-                download_revision,
-                download_root,
-                report_progress,
-                github_token=self.github_token,
-                huggingface_mirror=self.huggingface_mirror,
-                modelscope_cn_mirror=self.modelscope_cn_mirror,
-                modelscope_ai_mirror=self.modelscope_ai_mirror,
-                proxy_url=self.proxy_url,
-                disable_mirror=task.disable_mirror,
-                mirror_url=task.mirror_url,
-                disable_proxy=task.disable_proxy,
-                expected_resolved_revision=task.resolved_revision,
-                selected_paths=task.selected_paths,
-            )
+                download_revision = task.requested_revision
+                if task.resolved_revision and task.provider is Provider.HUGGINGFACE:
+                    download_revision = task.resolved_revision
+                elif (
+                    task.resolved_revision
+                    and task.provider is Provider.KAGGLE
+                    and task.resolved_revision.startswith("version:")
+                ):
+                    download_revision = task.resolved_revision.removeprefix("version:")
+                result = await run_provider(
+                    task.provider,
+                    task.source_id,
+                    download_revision,
+                    download_root,
+                    report_progress,
+                    github_token=self.github_token,
+                    huggingface_mirror=self.huggingface_mirror,
+                    modelscope_cn_mirror=self.modelscope_cn_mirror,
+                    modelscope_ai_mirror=self.modelscope_ai_mirror,
+                    proxy_url=self.proxy_url,
+                    disable_mirror=task.disable_mirror,
+                    mirror_url=task.mirror_url,
+                    disable_proxy=task.disable_proxy,
+                    expected_resolved_revision=task.resolved_revision,
+                    selected_paths=task.selected_paths,
+                )
             self._raise_if_stopped(task_id)
             if (
                 task.resolved_revision
@@ -903,8 +1127,54 @@ class TaskManager:
                 raise RuntimeError(
                     "provider returned a different resolved revision than the validated preflight"
                 )
-            await self._update(task_id, status=TaskStatus.VERIFYING, progress=92)
-            files = inventory(download_root)
+            self._save_provider_result(stage, result)
+            await self._stop_metrics(task_id, clear_eta=True)
+            files = self._load_verified_inventory(stage) if resume_from_stage else None
+            if files is None:
+                await self._update(
+                    task_id,
+                    status=TaskStatus.VERIFYING,
+                    progress=92,
+                    queue_position=None,
+                    error=None,
+                    instantaneous_bytes_per_second=0,
+                    eta_seconds=None,
+                    verification_bytes_completed=0,
+                    verification_total_bytes=task.total_bytes,
+                    verification_instantaneous_bytes_per_second=0,
+                    verification_average_bytes_per_second=0,
+                    verification_eta_seconds=None,
+                    verification_elapsed_seconds=0,
+                    verification_detail=(
+                        "Hashing files and checking source integrity"
+                        if result.expected_sha256
+                        else "Hashing files for the artifact manifest"
+                    ),
+                )
+                files = await self._verify_inventory(
+                    task_id,
+                    download_root,
+                    expected_sha256=result.expected_sha256,
+                )
+                self._save_verified_inventory(stage, files)
+            else:
+                verified_size = sum(file.size for file in files)
+                await self._update(
+                    task_id,
+                    status=TaskStatus.VERIFYING,
+                    progress=98,
+                    queue_position=None,
+                    error=None,
+                    instantaneous_bytes_per_second=0,
+                    eta_seconds=None,
+                    verification_bytes_completed=verified_size,
+                    verification_total_bytes=verified_size,
+                    verification_instantaneous_bytes_per_second=0,
+                    verification_eta_seconds=0,
+                    verification_detail="Verification complete",
+                )
+            self._raise_if_stopped(task_id)
+            await self._stop_verification_metrics(task_id)
             if not files:
                 raise RuntimeError("provider returned no files")
             if task.selected_paths is not None:
@@ -944,7 +1214,9 @@ class TaskManager:
                     resolved_revision=resolved_revision,
                     inferred_metadata=inferred,
                     instantaneous_bytes_per_second=0,
-                    eta_seconds=0,
+                    eta_seconds=None,
+                    verification_instantaneous_bytes_per_second=0,
+                    verification_eta_seconds=None,
                 )
                 return
             source_name = task.source_id.rstrip("/").split("/")[-1]
@@ -967,6 +1239,8 @@ class TaskManager:
                 status=TaskStatus.PUBLISHING,
                 progress=99,
                 resolved_revision=resolved_revision,
+                verification_instantaneous_bytes_per_second=0,
+                verification_eta_seconds=None,
             )
             self._raise_if_stopped(task_id)
             async with self._artifact_lock:
@@ -981,6 +1255,8 @@ class TaskManager:
                 total_bytes=manifest.total_size,
                 instantaneous_bytes_per_second=0,
                 eta_seconds=0,
+                verification_instantaneous_bytes_per_second=0,
+                verification_eta_seconds=0,
             )
         except asyncio.CancelledError:
             raise
@@ -992,14 +1268,49 @@ class TaskManager:
                 error=provider_failure_detail(task.provider, "download task", error),
                 instantaneous_bytes_per_second=0,
                 eta_seconds=None,
+                verification_instantaneous_bytes_per_second=0,
+                verification_eta_seconds=None,
             )
         finally:
             self._download_timing.pop(task_id, None)
             self._download_baselines.pop(task_id, None)
             self._progress_samples.pop(task_id, None)
             self._speed_ema.pop(task_id, None)
+            self._verification_written.pop(task_id, None)
+            self._verification_timing.pop(task_id, None)
+            self._verification_baselines.pop(task_id, None)
+            self._verification_samples.pop(task_id, None)
+            self._verification_speed_ema.pop(task_id, None)
 
     async def confirm_http(
+        self,
+        task_id: str,
+        *,
+        name: str,
+        version: str,
+        format: str | None,
+        extract: bool,
+    ) -> DownloadTask:
+        operation = asyncio.current_task()
+        existing = self._active_runs.get(task_id)
+        if existing is not None and existing is not operation:
+            raise ValueError("task confirmation is already running")
+        if operation is not None:
+            self._active_runs[task_id] = operation
+        try:
+            return await self._confirm_http(
+                task_id,
+                name=name,
+                version=version,
+                format=format,
+                extract=extract,
+            )
+        finally:
+            if self._active_runs.get(task_id) is operation:
+                self._active_runs.pop(task_id, None)
+            self._scheduler_wakeup.set()
+
+    async def _confirm_http(
         self,
         task_id: str,
         *,
@@ -1019,11 +1330,28 @@ class TaskManager:
             "confirmed",
             status=TaskStatus.VERIFYING,
             progress=96,
+            instantaneous_bytes_per_second=0,
+            eta_seconds=None,
+            verification_instantaneous_bytes_per_second=0,
+            verification_eta_seconds=None,
+            verification_detail="Preparing the staged download",
         )
         assert task.resolved_revision is not None
         stage = self.catalog.staging_path(task_id)
         download_root = stage / "download"
-        files = inventory(download_root)
+        files = self._load_verified_inventory(stage)
+        if files is None:
+            await self._update(
+                task_id,
+                verification_bytes_completed=0,
+                verification_total_bytes=task.total_bytes,
+                verification_average_bytes_per_second=0,
+                verification_elapsed_seconds=0,
+                verification_detail="Hashing files for the artifact manifest",
+            )
+            files = await self._verify_inventory(task_id, download_root)
+            await self._stop_verification_metrics(task_id)
+            self._save_verified_inventory(stage, files)
         if not files:
             raise RuntimeError("staged HTTP content is missing")
         publish_root = download_root
@@ -1032,8 +1360,20 @@ class TaskManager:
                 raise ValueError("automatic extraction requires exactly one downloaded archive")
             publish_root = stage / "publish"
             shutil.rmtree(publish_root, ignore_errors=True)
-            extract_archive(download_root / files[0].path, publish_root)
-            files = inventory(publish_root)
+            await self._update(task_id, verification_detail="Extracting the archive")
+            await asyncio.to_thread(extract_archive, download_root / files[0].path, publish_root)
+            await self._update(
+                task_id,
+                verification_bytes_completed=0,
+                verification_total_bytes=None,
+                verification_instantaneous_bytes_per_second=0,
+                verification_average_bytes_per_second=0,
+                verification_eta_seconds=None,
+                verification_elapsed_seconds=0,
+                verification_detail="Hashing extracted files for the artifact manifest",
+            )
+            files = await self._verify_inventory(task_id, publish_root)
+            await self._stop_verification_metrics(task_id)
         manifest = self.catalog.create_manifest(
             publish_root,
             name=name,

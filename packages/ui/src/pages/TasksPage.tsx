@@ -249,6 +249,9 @@ export function TasksPage() {
                 <span className={`badge ${task.status}`}>{task.status.replace("_", " ")}</span>
                 {task.status === "scheduled" && task.scheduledAt && <span className="task-live-metrics"><span>Starts {new Date(task.scheduledAt).toLocaleString()}</span></span>}
                 {task.status === "downloading" && <span className="task-live-metrics"><strong>{formatRate(task.instantaneousBytesPerSecond)}</strong><span aria-hidden="true">·</span><span>ETA {formatDuration(task.etaSeconds)}</span></span>}
+                {task.status === "verifying" && (task.verificationTotalBytes === undefined || task.verificationDetail === "Waiting for verification capacity"
+                  ? <span className="task-live-metrics"><span>{task.verificationDetail ?? "Verification in progress"}</span></span>
+                  : <span className="task-live-metrics"><strong>Verify {formatRate(task.verificationInstantaneousBytesPerSecond)}</strong><span aria-hidden="true">·</span><span>ETA {formatDuration(task.verificationEtaSeconds)}</span></span>)}
               </div>
             </td>
             <td><span className="mono truncate" title={task.resolvedRevision ?? task.requestedRevision}>{task.resolvedRevision ?? task.requestedRevision}</span></td>

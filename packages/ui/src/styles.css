@@ -245,6 +245,9 @@ input:focus, select:focus { border-color:var(--green); box-shadow:0 0 0 3px rgba
 .task-progress-summary span, .task-metrics span, .task-meta > span, .task-published > span { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.065em; font-weight:750; }
 .task-progress-summary strong { font-size:19px; letter-spacing:-.02em; }
 .task-progress-row { min-width:0; display:grid; grid-template-columns:minmax(0, 1fr) auto; align-items:center; gap:14px; }
+.progress.indeterminate { overflow:hidden; }
+.progress.indeterminate i { width:32% !important; animation:verification-indeterminate 1.4s ease-in-out infinite; }
+@keyframes verification-indeterminate { from { transform:translateX(-120%); } to { transform:translateX(340%); } }
 .task-progress-percent { min-width:46px; color:var(--green-dark); font-size:17px; text-align:right; white-space:nowrap; }
 .task-metrics { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }
 .task-metrics > div { display:grid; gap:4px; padding:11px 12px; border:1px solid #dfe7e1; border-radius:9px; background:white; }

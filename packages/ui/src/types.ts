@@ -129,6 +129,13 @@ export interface DownloadTask {
   averageBytesPerSecond?: number;
   etaSeconds?: number;
   downloadElapsedSeconds?: number;
+  verificationBytesCompleted?: number;
+  verificationTotalBytes?: number;
+  verificationInstantaneousBytesPerSecond?: number;
+  verificationAverageBytesPerSecond?: number;
+  verificationEtaSeconds?: number;
+  verificationElapsedSeconds?: number;
+  verificationDetail?: string;
   createdAt: string;
   updatedAt: string;
   error?: string;

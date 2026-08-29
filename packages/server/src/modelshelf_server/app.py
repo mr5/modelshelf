@@ -115,7 +115,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         os.environ["HTTP_PROXY"] = settings.http_proxy
         os.environ["HTTPS_PROXY"] = settings.http_proxy
     settings.storage_root = settings.storage_root.resolve()
-    catalog = Catalog(settings.storage_root)
+    if settings.artifact_storage_root is not None:
+        settings.artifact_storage_root = settings.artifact_storage_root.resolve()
+    catalog = Catalog(
+        settings.storage_root,
+        artifact_storage_root=settings.artifact_storage_root,
+    )
     catalog.initialize()
     manager = TaskManager(
         catalog,

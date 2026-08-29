@@ -62,6 +62,29 @@ def test_manifest_publish_and_verify(tmp_path: Path) -> None:
     assert verify_artifact(destination, full=True) == ["sha256: nested/model.gguf"]
 
 
+def test_artifact_storage_root_keeps_bytes_off_the_metadata_filesystem(tmp_path: Path) -> None:
+    metadata_root = tmp_path / "metadata"
+    artifact_storage_root = tmp_path / "artifact-storage"
+    catalog = Catalog(metadata_root, artifact_storage_root=artifact_storage_root)
+    catalog.initialize()
+
+    assert catalog.index_path == metadata_root / ".modelshelf/catalog.sqlite3"
+    assert catalog.jobs_root == metadata_root / ".modelshelf/jobs"
+    assert catalog.staging_root == artifact_storage_root / ".staging"
+    assert catalog.artifacts_root == artifact_storage_root / "artifacts"
+
+    stage = make_stage(catalog, "separate")
+    manifest = catalog.create_manifest(stage, name="model", version="1", source=source())
+    destination, deduplicated = catalog.publish(stage, manifest)
+
+    assert not deduplicated
+    assert destination.is_relative_to(artifact_storage_root / "artifacts")
+    assert not stage.exists()
+    assert catalog.find(manifest.artifact_id) is not None
+    assert not (metadata_root / "artifacts").exists()
+    assert not (metadata_root / ".staging").exists()
+
+
 def test_future_manifest_and_storage_layout_versions_are_rejected(tmp_path: Path) -> None:
     catalog = Catalog(tmp_path)
     catalog.initialize()

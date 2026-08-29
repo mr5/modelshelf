@@ -17,6 +17,15 @@ def test_settings_accept_comma_separated_write_tokens(
     assert settings.write_tokens == ("first", "second")
 
 
+def test_artifact_storage_root_is_optional_and_configurable(tmp_path: Path) -> None:
+    assert Settings().artifact_storage_root is None
+
+    configured = tmp_path / "artifact-storage"
+    settings = Settings(artifact_storage_root=configured)
+
+    assert settings.artifact_storage_root == configured
+
+
 def test_settings_require_argon2id_hash() -> None:
     with pytest.raises(ValidationError, match="Argon2id"):
         Settings(admin_password_hash="$argon2i$v=19$invalid")

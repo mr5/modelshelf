@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, formatDownloadSize } from "../api.ts";
+import { api, formatBytes } from "../api.ts";
 import type {
   DownloadEstimate,
   DownloadTask,
@@ -458,7 +458,7 @@ export function NewTaskPage() {
             {duplicate.taskId && <Link to={`/tasks/${duplicate.taskId}`}>Open existing task →</Link>}
           </div>}
           <div className="estimate-summary">
-            <div><span>Estimated download</span><strong>{displaySize === undefined ? "Size unavailable" : formatDownloadSize(displaySize)}</strong></div>
+            <div><span>Estimated download</span><strong>{displaySize === undefined ? "Size unavailable" : formatBytes(displaySize)}</strong></div>
             <div><span>Files</span><strong>{displayFileCount === undefined ? "Unknown" : displayFileCount.toLocaleString()}</strong></div>
           </div>
           {estimate.ggufVariantSelectionAvailable && availableVariants.length > 0 && <section className="file-selection">
@@ -480,12 +480,12 @@ export function NewTaskPage() {
                     && variant.paths.every((path, index) => path === selectedPaths[index]);
                   return <label className="file-selection-item" key={variant.label}>
                     <input type="radio" name="gguf-variant" checked={checked} onChange={() => setSelectedPaths(variant.paths)} />
-                    <span><code title={variant.paths.join("\n")}>{variant.label}</code><small>{variant.fileCount > 1 ? `${variant.fileCount} shards · ` : ""}{variant.totalSize === undefined ? "size unavailable" : formatDownloadSize(variant.totalSize)}</small></span>
+                    <span><code title={variant.paths.join("\n")}>{variant.label}</code><small>{variant.fileCount > 1 ? `${variant.fileCount} shards · ` : ""}{variant.totalSize === undefined ? "size unavailable" : formatBytes(variant.totalSize)}</small></span>
                   </label>;
                 })}
                 {visibleVariants.length === 0 && <p className="muted">No variants match this filter.</p>}
               </div>
-              <div className={`file-selection-status ${selectedVariant ? "" : "invalid"}`}>{selectedVariant ? `${selectedVariant.fileCount.toLocaleString()} ${selectedVariant.fileCount === 1 ? "file" : "files"} selected${selectedVariant.totalSize === undefined ? "" : ` · ${formatDownloadSize(selectedVariant.totalSize)}`}` : "Select one GGUF variant."}</div>
+              <div className={`file-selection-status ${selectedVariant ? "" : "invalid"}`}>{selectedVariant ? `${selectedVariant.fileCount.toLocaleString()} ${selectedVariant.fileCount === 1 ? "file" : "files"} selected${selectedVariant.totalSize === undefined ? "" : ` · ${formatBytes(selectedVariant.totalSize)}`}` : "Select one GGUF variant."}</div>
               {estimate.ggufAuxiliaryFiles && estimate.ggufAuxiliaryFiles.length > 0 && <div className="file-selection-note">
                 Auxiliary GGUF files such as projectors are not included. Download the full repository if your runtime needs them.
               </div>}

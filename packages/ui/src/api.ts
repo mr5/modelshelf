@@ -59,12 +59,6 @@ export function formatBytes(value: number): string {
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${unit}`;
 }
 
-export function formatDownloadSize(value: number): string {
-  const decimalGigabytes = value / 1_000_000_000;
-  const digits = decimalGigabytes >= 100 ? 1 : decimalGigabytes >= 10 ? 2 : 3;
-  return `${formatBytes(value)} · ${decimalGigabytes.toFixed(digits)} GB`;
-}
-
 export function formatRate(value?: number): string {
   return value && value > 0 ? `${formatBytes(value)}/s` : "—";
 }

@@ -15,7 +15,6 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
     storage_root: Path = Path("./data")
-    artifact_storage_root: Path | None = None
     import_roots: Annotated[tuple[Path, ...], NoDecode] = ()
     ui_dist: Path | None = None
     client_dist: Path | None = None

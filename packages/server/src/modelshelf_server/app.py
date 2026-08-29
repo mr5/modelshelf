@@ -8,6 +8,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -28,7 +29,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from modelshelf_core import Catalog, Provider
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from . import __version__
 from .client_distribution import (
@@ -56,11 +57,52 @@ class LoginRequest(BaseModel):
 
 
 class CreateTaskRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     provider: Provider
     id: str = Field(min_length=1)
     revision: str = Field(default="main", min_length=1)
-    disable_mirror: bool = False
-    disable_proxy: bool = False
+    disable_mirror: bool = Field(default=False, alias="disableMirror")
+    mirror_url: str | None = Field(default=None, alias="mirrorUrl")
+    disable_proxy: bool = Field(default=False, alias="disableProxy")
+    scheduled_at: datetime | None = Field(default=None, alias="scheduledAt")
+
+    @field_validator("mirror_url", mode="before")
+    @classmethod
+    def validate_mirror_url(cls, value: object) -> str | None:
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str):
+            raise ValueError("temporary mirror address must be a string")
+        candidate = value.strip().rstrip("/")
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("temporary mirror address must be an HTTP(S) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("temporary mirror address must not contain credentials")
+        return candidate
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def validate_scheduled_at(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("scheduled start must include a timezone")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def validate_network_route(self) -> CreateTaskRequest:
+        mirror_providers = {
+            Provider.HUGGINGFACE,
+            Provider.MODELSCOPE_CN,
+            Provider.MODELSCOPE_AI,
+        }
+        if self.mirror_url and self.provider not in mirror_providers:
+            raise ValueError("temporary mirrors are not supported for this source")
+        if self.mirror_url and self.disable_mirror:
+            raise ValueError("temporary mirror and mirror bypass cannot be enabled together")
+        return self
 
 
 class ConfirmHttpRequest(BaseModel):
@@ -68,6 +110,21 @@ class ConfirmHttpRequest(BaseModel):
     version: str = Field(min_length=1)
     format: str | None = None
     extract: bool = False
+
+
+class ResumeTaskRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    scheduled_at: datetime | None = Field(default=None, alias="scheduledAt")
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def validate_scheduled_at(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("scheduled resume must include a timezone")
+        return value.astimezone(UTC)
 
 
 def _sign_session(settings: Settings, expires: int) -> str:
@@ -131,9 +188,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     revision_inflight: dict[tuple[Provider, str], asyncio.Task[RevisionDiscovery]] = {}
     model_cache: dict[tuple[Provider, str], tuple[float, ModelSearch]] = {}
     model_inflight: dict[tuple[Provider, str], asyncio.Task[ModelSearch]] = {}
-    estimate_cache: dict[tuple[Provider, str, str, bool, bool], tuple[float, DownloadEstimate]] = {}
+    estimate_cache: dict[
+        tuple[Provider, str, str, bool, str | None, bool], tuple[float, DownloadEstimate]
+    ] = {}
     estimate_inflight: dict[
-        tuple[Provider, str, str, bool, bool], asyncio.Task[DownloadEstimate]
+        tuple[Provider, str, str, bool, str | None, bool], asyncio.Task[DownloadEstimate]
     ] = {}
 
     def track_inflight[Result, Key](
@@ -159,9 +218,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return await request
         except TimeoutError as error:
             seconds = settings.provider_metadata_timeout_seconds
-            timeout = TimeoutError(
-                f"timed out after {seconds:g} seconds waiting for the provider"
-            )
+            timeout = TimeoutError(f"timed out after {seconds:g} seconds waiting for the provider")
             raise HTTPException(
                 status.HTTP_504_GATEWAY_TIMEOUT,
                 provider_failure_detail(provider, operation, timeout),
@@ -224,9 +281,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         source_id: str,
         revision: str,
         disable_mirror: bool,
+        mirror_url: str | None,
         disable_proxy: bool,
     ) -> DownloadEstimate:
-        key = (provider, source_id, revision, disable_mirror, disable_proxy)
+        key = (provider, source_id, revision, disable_mirror, mirror_url, disable_proxy)
         now = time.monotonic()
         cached = estimate_cache.get(key)
         if cached and cached[0] > now:
@@ -244,6 +302,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     modelscope_ai_mirror=settings.modelscope_ai_mirror,
                     proxy_url=settings.http_proxy,
                     disable_mirror=disable_mirror,
+                    mirror_url=mirror_url,
                     disable_proxy=disable_proxy,
                 )
             )
@@ -261,6 +320,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         source_id: str,
         revision: str,
         disable_mirror: bool = False,
+        mirror_url: str | None = None,
         disable_proxy: bool = False,
     ) -> DownloadEstimate:
         try:
@@ -272,6 +332,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     source_id.strip(),
                     revision.strip(),
                     disable_mirror,
+                    mirror_url,
                     disable_proxy,
                 ),
             )
@@ -569,10 +630,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         source_id: Annotated[str, Query(alias="id", min_length=1, max_length=2048)],
         revision: Annotated[str, Query(min_length=1, max_length=256)],
         disable_mirror: Annotated[bool, Query(alias="disableMirror")] = False,
+        mirror_url: Annotated[
+            str | None, Query(alias="mirrorUrl", min_length=1, max_length=2048)
+        ] = None,
         disable_proxy: Annotated[bool, Query(alias="disableProxy")] = False,
     ) -> dict[str, object]:
+        try:
+            request = CreateTaskRequest(
+                provider=provider,
+                id=source_id,
+                revision=revision,
+                disableMirror=disable_mirror,
+                mirrorUrl=mirror_url,
+                disableProxy=disable_proxy,
+            )
+        except ValidationError as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                error.errors(include_url=False, include_context=False, include_input=False),
+            ) from error
         result = await validated_estimate(
-            provider, source_id, revision, disable_mirror, disable_proxy
+            request.provider,
+            request.id,
+            request.revision,
+            request.disable_mirror,
+            request.mirror_url,
+            request.disable_proxy,
         )
         response = result.as_dict()
         duplicate = manager.find_duplicate(
@@ -580,8 +663,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             result.source_id,
             result.requested_revision,
             resolved_revision=result.resolved_revision,
-            disable_mirror=disable_mirror,
-            disable_proxy=disable_proxy,
+            disable_mirror=request.disable_mirror,
+            mirror_url=request.mirror_url,
+            disable_proxy=request.disable_proxy,
         )
         if duplicate is not None:
             response["duplicate"] = duplicate.as_dict()
@@ -619,13 +703,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     async def control_task(
-        task_id: str, operation: Literal["pause", "resume", "cancel"]
+        task_id: str, operation: Literal["pause", "cancel", "start"]
     ) -> dict[str, Any]:
         try:
             if operation == "pause":
                 item = await manager.pause(task_id)
-            elif operation == "resume":
-                item = await manager.resume(task_id)
+            elif operation == "start":
+                item = await manager.start_now(task_id)
             else:
                 item = await manager.cancel(task_id)
         except KeyError as error:
@@ -639,12 +723,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await control_task(task_id, "pause")
 
     @app.post("/api/v1/tasks/{task_id}/resume", dependencies=[Depends(require_write)])
-    async def resume_task(task_id: str) -> dict[str, Any]:
-        return await control_task(task_id, "resume")
+    async def resume_task(
+        task_id: str, body: ResumeTaskRequest | None = None
+    ) -> dict[str, Any]:
+        try:
+            item = await manager.resume(
+                task_id, scheduled_at=body.scheduled_at if body is not None else None
+            )
+        except KeyError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        return item.model_dump(mode="json", by_alias=True, exclude_none=True)
 
     @app.post("/api/v1/tasks/{task_id}/cancel", dependencies=[Depends(require_write)])
     async def cancel_task(task_id: str) -> dict[str, Any]:
         return await control_task(task_id, "cancel")
+
+    @app.post("/api/v1/tasks/{task_id}/start", dependencies=[Depends(require_write)])
+    async def start_task_now(task_id: str) -> dict[str, Any]:
+        return await control_task(task_id, "start")
 
     @app.post(
         "/api/v1/tasks",
@@ -657,6 +755,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.id,
             body.revision,
             body.disable_mirror,
+            body.mirror_url,
             body.disable_proxy,
         )
         creation = await manager.create_with_result(
@@ -666,7 +765,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resolved_revision=estimate.resolved_revision,
             total_bytes=estimate.total_size,
             disable_mirror=body.disable_mirror,
+            mirror_url=body.mirror_url,
             disable_proxy=body.disable_proxy,
+            scheduled_at=body.scheduled_at,
         )
         item = creation.task
         result = item.model_dump(mode="json", by_alias=True, exclude_none=True)

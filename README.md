@@ -114,16 +114,19 @@ The task form searches model IDs, discovers revisions, runs an authenticated pre
 the resolved immutable revision, estimated size/file count, metadata, and source page before the
 task can be saved. Manual IDs and revisions use the same validation.
 
-Downloads expose transferred bytes, current/average speed, and ETA. They can be paused, resumed, or
-cancelled. Concurrency is bounded by `MODELSHELF_MAX_CONCURRENT_DOWNLOADS` globally and
+Downloads expose transferred bytes, current/average speed, and ETA. They can be paused, resumed
+immediately or at a later time, and cancelled. A task can lock its immutable revision immediately
+and defer entering the download queue until a one-time UTC timestamp. Scheduled starts and resumes
+use one-shot timers and do not poll the source. Concurrency is bounded by `MODELSHELF_MAX_CONCURRENT_DOWNLOADS` globally and
 `MODELSHELF_MAX_CONCURRENT_DOWNLOADS_PER_SOURCE` per source.
 Hub search, revision discovery and preflight fail with HTTP 504 instead of waiting indefinitely;
 change the 30-second bound with `MODELSHELF_PROVIDER_METADATA_TIMEOUT_SECONDS` if needed.
 
 Optional source-specific mirrors and the global HTTP(S) proxy are configured in `.env`. The UI
-shows when routing is active and can bypass mirror and proxy independently for one task. ModelScope
-CN and AI are separate sources with separate endpoints and tokens; neither is a mirror or auth
-fallback for the other.
+shows the active route. A task can bypass mirror and proxy independently, or use a temporary
+HTTP(S) mirror that overrides the configured mirror for both preflight and download. ModelScope CN
+and AI are separate sources with separate endpoints and tokens; neither is a mirror or auth fallback
+for the other.
 
 Generic HTTP uses a two-stage flow: the URL is downloaded to staging, metadata is inferred, and the
 administrator explicitly chooses whether to extract before publication. URL text is not the

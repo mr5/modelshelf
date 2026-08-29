@@ -984,6 +984,7 @@ async def _isolated_estimate(
     modelscope_cn_mirror: str | None,
     modelscope_ai_mirror: str | None,
     disable_mirror: bool,
+    mirror_url: str | None,
 ) -> DownloadEstimate:
     payload = {
         "operation": "estimate",
@@ -995,6 +996,7 @@ async def _isolated_estimate(
         "modelscopeCnMirror": modelscope_cn_mirror,
         "modelscopeAiMirror": modelscope_ai_mirror,
         "disableMirror": disable_mirror,
+        "mirrorUrl": mirror_url,
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -1038,6 +1040,7 @@ async def _isolated_download(
     modelscope_cn_mirror: str | None,
     modelscope_ai_mirror: str | None,
     disable_mirror: bool,
+    mirror_url: str | None,
     direct: bool,
     expected_resolved_revision: str | None,
 ) -> ProviderResult:
@@ -1052,6 +1055,7 @@ async def _isolated_download(
         "modelscopeCnMirror": modelscope_cn_mirror,
         "modelscopeAiMirror": modelscope_ai_mirror,
         "disableMirror": disable_mirror,
+        "mirrorUrl": mirror_url,
         "expectedResolvedRevision": expected_resolved_revision,
     }
     process = await asyncio.create_subprocess_exec(
@@ -1126,6 +1130,7 @@ async def estimate_download(
     modelscope_ai_mirror: str | None = None,
     proxy_url: str | None = None,
     disable_mirror: bool = False,
+    mirror_url: str | None = None,
     disable_proxy: bool = False,
     _isolated: bool = False,
 ) -> DownloadEstimate:
@@ -1150,15 +1155,16 @@ async def estimate_download(
             modelscope_cn_mirror=modelscope_cn_mirror,
             modelscope_ai_mirror=modelscope_ai_mirror,
             disable_mirror=disable_mirror,
+            mirror_url=mirror_url,
         )
     if provider is Provider.HUGGINGFACE:
-        endpoint = _provider_endpoint(provider, huggingface_mirror, disable_mirror)
+        endpoint = _provider_endpoint(provider, mirror_url or huggingface_mirror, disable_mirror)
         assert endpoint is not None
         return await _estimate_huggingface(source_id, revision, endpoint)
     if provider in MODELSCOPE_PROVIDERS:
         endpoint = _provider_endpoint(
             provider,
-            _modelscope_mirror(provider, modelscope_cn_mirror, modelscope_ai_mirror),
+            mirror_url or _modelscope_mirror(provider, modelscope_cn_mirror, modelscope_ai_mirror),
             disable_mirror,
         )
         assert endpoint is not None
@@ -1674,6 +1680,7 @@ async def run_provider(
     modelscope_ai_mirror: str | None = None,
     proxy_url: str | None = None,
     disable_mirror: bool = False,
+    mirror_url: str | None = None,
     disable_proxy: bool = False,
     expected_resolved_revision: str | None = None,
     _isolated: bool = False,
@@ -1690,17 +1697,18 @@ async def run_provider(
             modelscope_cn_mirror=modelscope_cn_mirror,
             modelscope_ai_mirror=modelscope_ai_mirror,
             disable_mirror=disable_mirror,
+            mirror_url=mirror_url,
             direct=disable_proxy,
             expected_resolved_revision=expected_resolved_revision,
         )
     if provider is Provider.HUGGINGFACE:
-        endpoint = _provider_endpoint(provider, huggingface_mirror, disable_mirror)
+        endpoint = _provider_endpoint(provider, mirror_url or huggingface_mirror, disable_mirror)
         assert endpoint is not None
         return await download_huggingface(source_id, revision, destination, progress, endpoint)
     if provider in MODELSCOPE_PROVIDERS:
         endpoint = _provider_endpoint(
             provider,
-            _modelscope_mirror(provider, modelscope_cn_mirror, modelscope_ai_mirror),
+            mirror_url or _modelscope_mirror(provider, modelscope_cn_mirror, modelscope_ai_mirror),
             disable_mirror,
         )
         assert endpoint is not None

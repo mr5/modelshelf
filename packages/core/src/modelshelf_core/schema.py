@@ -81,12 +81,20 @@ def _task_v0_to_v1(document: dict[str, Any]) -> dict[str, Any]:
     return dict(document)
 
 
+def _task_v1_to_v2(document: dict[str, Any]) -> dict[str, Any]:
+    result = dict(document)
+    result.setdefault("mirrorUrl", None)
+    result.setdefault("scheduledAt", None)
+    result.setdefault("resumeFromStage", False)
+    return result
+
+
 def load_task_json(raw: str) -> tuple[DownloadTask, bool]:
     document, migrated = _migrate_document(
         _json_object(raw, "download task"),
         document_name="download task",
         current_version=TASK_SCHEMA_VERSION,
-        migrations={0: _task_v0_to_v1},
+        migrations={0: _task_v0_to_v1, 1: _task_v1_to_v2},
         missing_version=0,
     )
     return DownloadTask.model_validate(document), migrated

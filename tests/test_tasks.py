@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import modelshelf_server.tasks as task_module
@@ -170,7 +171,7 @@ def test_create_reuses_task_with_the_same_immutable_identity(tmp_path: Path) -> 
     asyncio.run(exercise())
 
 
-def test_pre_release_task_file_is_atomically_upgraded_to_schema_v1(tmp_path: Path) -> None:
+def test_old_task_files_are_atomically_upgraded_to_schema_v2(tmp_path: Path) -> None:
     catalog = Catalog(tmp_path / "storage")
     catalog.initialize()
     manager = TaskManager(catalog, github_token=None)
@@ -187,10 +188,21 @@ def test_pre_release_task_file_is_atomically_upgraded_to_schema_v1(tmp_path: Pat
 
     loaded = manager.store.get(task_id)
     assert loaded is not None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 1
+    assert loaded.mirror_url is None
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 2
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
-    document["schemaVersion"] = 2
+    document["schemaVersion"] = 1
+    document.pop("mirrorUrl", None)
+    task_path.write_text(json.dumps(document), encoding="utf-8")
+    migrated = manager.store.get(task_id)
+    assert migrated is not None
+    assert migrated.mirror_url is None
+    assert migrated.scheduled_at is None
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 2
+
+    document = json.loads(task_path.read_text(encoding="utf-8"))
+    document["schemaVersion"] = 3
     task_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
         manager.store.list()
@@ -287,28 +299,36 @@ def test_create_keeps_explicit_network_routes_separate(tmp_path: Path) -> None:
             resolved_revision=resolved,
             disable_mirror=True,
         )
+        temporary_mirror_route = await manager.create(
+            Provider.HUGGINGFACE,
+            "owner/model",
+            "main",
+            resolved_revision=resolved,
+            mirror_url="https://temporary-mirror.example",
+        )
         assert direct_route.id != default_route.id
-        assert manager.queue.qsize() == 2
+        assert temporary_mirror_route.id not in {default_route.id, direct_route.id}
+        assert manager.queue.qsize() == 3
 
     asyncio.run(exercise())
 
 
-def test_download_uses_the_preflight_resolved_revision(
+def test_scheduled_task_does_not_enter_queue_until_its_start_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    captured_revision = ""
-    resolved = "d" * 40
+    calls = 0
+    resolved = "9" * 40
 
     async def fake_provider(
         _provider: Provider,
         _source_id: str,
-        revision: str,
+        _revision: str,
         destination: Path,
         _progress: Progress,
         **_options: object,
     ) -> ProviderResult:
-        nonlocal captured_revision
-        captured_revision = revision
+        nonlocal calls
+        calls += 1
         (destination / "model.bin").write_bytes(b"model")
         return ProviderResult(resolved_revision=resolved)
 
@@ -325,6 +345,205 @@ def test_download_uses_the_preflight_resolved_revision(
                 "owner/model",
                 "main",
                 resolved_revision=resolved,
+                scheduled_at=datetime.now(UTC) + timedelta(milliseconds=200),
+            )
+            assert task.status is TaskStatus.SCHEDULED
+            assert manager.queue.qsize() == 0
+            await asyncio.sleep(0.05)
+            assert calls == 0
+            assert manager.store.get(task.id).status is TaskStatus.SCHEDULED  # type: ignore[union-attr]
+
+            deadline = asyncio.get_running_loop().time() + 2
+            while asyncio.get_running_loop().time() < deadline:
+                current = manager.store.get(task.id)
+                if current is not None and current.status is TaskStatus.COMPLETED:
+                    break
+                await asyncio.sleep(0.02)
+            assert manager.store.get(task.id).status is TaskStatus.COMPLETED  # type: ignore[union-attr]
+            assert calls == 1
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
+def test_scheduled_task_can_start_immediately(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.HUGGINGFACE,
+                "owner/model",
+                "main",
+                resolved_revision="8" * 40,
+                scheduled_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+            queued = await manager.start_now(task.id)
+            assert queued.status is TaskStatus.QUEUED
+            assert task.id not in manager._scheduled_runs
+            assert manager.queue.qsize() == 1
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
+def test_delayed_resume_preserves_staging_data_across_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = "5" * 40
+    resumed_from_stage = False
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: Progress,
+        **_options: object,
+    ) -> ProviderResult:
+        nonlocal resumed_from_stage
+        resumed_from_stage = (destination / "resume-marker").is_file()
+        (destination / "model.bin").write_bytes(b"model")
+        return ProviderResult(resolved_revision=resolved)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    seed = TaskManager(catalog, github_token=None)
+    task = seed.store.create(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        resolved_revision=resolved,
+        total_bytes=None,
+        disable_mirror=False,
+        disable_proxy=False,
+    )
+    seed.store.update(task.id, {"status": TaskStatus.PAUSED, "resume_from_stage": True})
+    artifact_stage = catalog.staging_path(task.id) / "artifact"
+    artifact_stage.mkdir(parents=True)
+    (artifact_stage / "resume-marker").write_text("keep", encoding="utf-8")
+
+    async def exercise() -> None:
+        await seed.start()
+        scheduled = await seed.resume(
+            task.id, scheduled_at=datetime.now(UTC) + timedelta(hours=1)
+        )
+        assert scheduled.status is TaskStatus.SCHEDULED
+        assert scheduled.resume_from_stage is True
+        assert seed.queue.qsize() == 0
+        await seed.stop()
+
+        seed.store.update(task.id, {"scheduled_at": datetime.now(UTC) - timedelta(seconds=1)})
+        manager = TaskManager(catalog, github_token=None)
+        await manager.start()
+        try:
+            deadline = asyncio.get_running_loop().time() + 2
+            while asyncio.get_running_loop().time() < deadline:
+                current = manager.store.get(task.id)
+                if current is not None and current.status is TaskStatus.COMPLETED:
+                    break
+                await asyncio.sleep(0.02)
+            current = manager.store.get(task.id)
+            assert current is not None
+            assert current.status is TaskStatus.COMPLETED
+            assert resumed_from_stage is True
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
+def test_overdue_scheduled_task_is_recovered_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = "6" * 40
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: Progress,
+        **_options: object,
+    ) -> ProviderResult:
+        (destination / "model.bin").write_bytes(b"model")
+        return ProviderResult(resolved_revision=resolved)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    seed = TaskManager(catalog, github_token=None)
+    task = seed.store.create(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        resolved_revision=resolved,
+        total_bytes=None,
+        disable_mirror=False,
+        disable_proxy=False,
+        scheduled_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    seed.store.update(task.id, {"scheduled_at": datetime.now(UTC) - timedelta(minutes=1)})
+
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            deadline = asyncio.get_running_loop().time() + 2
+            while asyncio.get_running_loop().time() < deadline:
+                current = manager.store.get(task.id)
+                if current is not None and current.status is TaskStatus.COMPLETED:
+                    break
+                await asyncio.sleep(0.02)
+            assert manager.store.get(task.id).status is TaskStatus.COMPLETED  # type: ignore[union-attr]
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
+def test_download_uses_the_preflight_resolved_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured_revision = ""
+    captured_options: dict[str, object] = {}
+    resolved = "d" * 40
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        revision: str,
+        destination: Path,
+        _progress: Progress,
+        **options: object,
+    ) -> ProviderResult:
+        nonlocal captured_revision
+        captured_revision = revision
+        captured_options.update(options)
+        (destination / "model.bin").write_bytes(b"model")
+        return ProviderResult(resolved_revision=resolved)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.HUGGINGFACE,
+                "owner/model",
+                "main",
+                resolved_revision=resolved,
+                mirror_url="https://temporary-mirror.example",
             )
             await asyncio.wait_for(manager.queue.join(), timeout=2)
             assert manager.store.get(task.id).status.value == "completed"  # type: ignore[union-attr]
@@ -333,6 +552,7 @@ def test_download_uses_the_preflight_resolved_revision(
 
     asyncio.run(exercise())
     assert captured_revision == resolved
+    assert captured_options["mirror_url"] == "https://temporary-mirror.example"
 
 
 def test_modelscope_download_uses_requested_revision_with_preflight_commit_guard(

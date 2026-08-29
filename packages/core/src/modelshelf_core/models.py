@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MANIFEST_SCHEMA_VERSION = 1
-TASK_SCHEMA_VERSION = 1
+TASK_SCHEMA_VERSION = 2
 STORAGE_LAYOUT_SCHEMA_VERSION = 1
 
 
@@ -32,6 +33,7 @@ class Provider(StrEnum):
 
 
 class TaskStatus(StrEnum):
+    SCHEDULED = "scheduled"
     QUEUED = "queued"
     RESOLVING = "resolving"
     DOWNLOADING = "downloading"
@@ -109,13 +111,16 @@ class InferredMetadata(Model):
 
 
 class DownloadTask(Model):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     id: str
     provider: Provider
     source_id: str
     requested_revision: str
     disable_mirror: bool = False
+    mirror_url: str | None = None
     disable_proxy: bool = False
+    scheduled_at: datetime | None = None
+    resume_from_stage: bool = False
     resolved_revision: str | None = None
     status: TaskStatus
     progress: int = Field(ge=0, le=100)
@@ -130,6 +135,38 @@ class DownloadTask(Model):
     error: str | None = None
     artifact_id: str | None = None
     inferred_metadata: InferredMetadata | None = None
+
+    @field_validator("mirror_url")
+    @classmethod
+    def valid_mirror_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("mirror URL must be an HTTP(S) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("mirror URL must not contain credentials")
+        return value.rstrip("/")
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def timezone_aware_schedule(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("scheduled start must include a timezone")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def valid_mirror_route(self) -> DownloadTask:
+        supported = {Provider.HUGGINGFACE, Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}
+        if self.mirror_url and self.provider not in supported:
+            raise ValueError("temporary mirrors are not supported for this source")
+        if self.mirror_url and self.disable_mirror:
+            raise ValueError("temporary mirror and mirror bypass cannot be enabled together")
+        if self.status is TaskStatus.SCHEDULED and self.scheduled_at is None:
+            raise ValueError("scheduled task must include a start time")
+        return self
 
 
 class DesiredModel(Model):

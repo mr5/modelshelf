@@ -108,15 +108,17 @@ session 或 bearer token。任务创建和所有管理操作始终需要认证�
 resolved immutable revision、预计大小/文件数、元信息和 source 页面。手动输入 ID 或 revision
 也执行相同校验。
 
-下载任务展示已传输大小、瞬时/平均速度和 ETA，并支持暂停、恢复和取消。
+下载任务展示已传输大小、瞬时/平均速度和 ETA，并支持暂停、立即或延迟恢复，以及取消。
 `MODELSHELF_MAX_CONCURRENT_DOWNLOADS` 控制全局并发，
 `MODELSHELF_MAX_CONCURRENT_DOWNLOADS_PER_SOURCE` 控制单个 source 的并发。
+任务可在创建时锁定 immutable revision，并设置一次性延迟开始时间；延迟开始和延迟恢复均使用一次性定时器，等待期间不会轮询 source。
 Hub 搜索、revision 查询和 preflight 默认最多等待 30 秒，超时返回 HTTP 504；可通过
 `MODELSHELF_PROVIDER_METADATA_TIMEOUT_SECONDS` 调整。
 
 `.env` 可设置各 source 的镜像和全局 HTTP(S) 代理。UI 会提示当前路由，并允许单个任务分别
-绕过镜像或代理。ModelScope CN 和 AI 是两个独立 source，使用不同地址和 token，互相不是
-mirror 或认证 fallback。
+绕过镜像或代理，也可以为单个任务指定临时 HTTP(S) 镜像；临时地址会同时覆盖 preflight 和
+实际下载使用的环境变量镜像。ModelScope CN 和 AI 是两个独立 source，使用不同地址和 token，
+互相不是 mirror 或认证 fallback。
 
 Generic HTTP 使用两阶段流程：先将 URL 下载到 staging 并推断元信息，再由管理员明确选择是否
 解包并确认发布。URL 文本不作为 artifact identity，实际下载内容的摘要才是最终 identity。

@@ -79,6 +79,7 @@ export interface ServerInfo {
 }
 
 export type TaskStatus =
+  | "scheduled"
   | "queued"
   | "resolving"
   | "downloading"
@@ -105,7 +106,10 @@ export interface DownloadTask {
   sourceId: string;
   requestedRevision: string;
   disableMirror?: boolean;
+  mirrorUrl?: string;
   disableProxy?: boolean;
+  scheduledAt?: string;
+  resumeFromStage?: boolean;
   resolvedRevision?: string;
   status: TaskStatus;
   progress: number;

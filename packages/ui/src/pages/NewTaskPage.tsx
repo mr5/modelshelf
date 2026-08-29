@@ -42,6 +42,23 @@ function isAbortError(cause: unknown): boolean {
   return cause instanceof DOMException && cause.name === "AbortError";
 }
 
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:")
+      && parsed.hostname.length > 0
+      && parsed.username.length === 0
+      && parsed.password.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function localDateTimeValue(date: Date): string {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 function lookup<T>(path: string, controller: AbortController): Promise<T> {
   const timeout = window.setTimeout(() => {
     controller.abort(new DOMException(
@@ -60,7 +77,11 @@ export function NewTaskPage() {
   const [revision, setRevision] = useState("main");
   const [serverInfo, setServerInfo] = useState<ServerInfo | null>(null);
   const [disableMirror, setDisableMirror] = useState(false);
+  const [useTemporaryMirror, setUseTemporaryMirror] = useState(false);
+  const [mirrorUrl, setMirrorUrl] = useState("");
   const [disableProxy, setDisableProxy] = useState(false);
+  const [delayDownload, setDelayDownload] = useState(false);
+  const [scheduledAt, setScheduledAt] = useState("");
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [revisionOptions, setRevisionOptions] = useState<RevisionOption[]>([]);
   const [modelLookup, setModelLookup] = useState<LookupState>("idle");
@@ -132,9 +153,12 @@ export function NewTaskPage() {
   useEffect(() => {
     const sourceId = id.trim();
     const requestedRevision = revision.trim();
+    const temporaryMirror = useTemporaryMirror ? mirrorUrl.trim() : "";
     const ready = provider === "http"
       ? /^https?:\/\//i.test(sourceId) && requestedRevision.length > 0
-      : hasCompleteModelId(provider, sourceId) && requestedRevision.length > 0;
+      : hasCompleteModelId(provider, sourceId)
+        && requestedRevision.length > 0
+        && (!useTemporaryMirror || isHttpUrl(temporaryMirror));
     if (!ready) {
       setEstimate(null);
       setEstimateKey("");
@@ -143,13 +167,20 @@ export function NewTaskPage() {
       return;
     }
 
-    const key = `${provider}\u0000${sourceId}\u0000${requestedRevision}\u0000${disableMirror}\u0000${disableProxy}`;
+    const key = `${provider}\u0000${sourceId}\u0000${requestedRevision}\u0000${disableMirror}\u0000${temporaryMirror}\u0000${disableProxy}`;
+    const params = new URLSearchParams({
+      id: sourceId,
+      revision: requestedRevision,
+      disableMirror: String(disableMirror),
+      disableProxy: String(disableProxy),
+    });
+    if (temporaryMirror) params.set("mirrorUrl", temporaryMirror);
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       setEstimateLookup("loading");
       setEstimateError("");
       void lookup<DownloadEstimate>(
-        `/providers/${provider}/estimate?id=${encodeURIComponent(sourceId)}&revision=${encodeURIComponent(requestedRevision)}&disableMirror=${disableMirror}&disableProxy=${disableProxy}`,
+        `/providers/${provider}/estimate?${params.toString()}`,
         controller,
       ).then((result) => {
         setEstimate(result);
@@ -168,7 +199,7 @@ export function NewTaskPage() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [disableMirror, disableProxy, id, provider, revision]);
+  }, [disableMirror, disableProxy, id, mirrorUrl, provider, revision, useTemporaryMirror]);
 
   useEffect(() => {
     const sourceId = id.trim();
@@ -209,6 +240,10 @@ export function NewTaskPage() {
     setBusy(true);
     setError("");
     try {
+      const scheduledStart = delayDownload ? new Date(scheduledAt) : null;
+      if (scheduledStart && (Number.isNaN(scheduledStart.getTime()) || scheduledStart <= new Date())) {
+        throw new Error("Choose a scheduled start time in the future.");
+      }
       const task = await api<DownloadTask>("/tasks", {
         method: "POST",
         body: JSON.stringify({
@@ -216,7 +251,9 @@ export function NewTaskPage() {
           id: id.trim(),
           revision: revision.trim(),
           disableMirror,
+          mirrorUrl: useTemporaryMirror ? mirrorUrl.trim() : undefined,
           disableProxy,
+          scheduledAt: scheduledStart?.toISOString(),
         }),
       });
       navigate(`/tasks/${task.id}`);
@@ -228,9 +265,14 @@ export function NewTaskPage() {
   }
 
   const selected = providers.find((item) => item.value === provider)!;
-  const currentEstimateKey = `${provider}\u0000${id.trim()}\u0000${revision.trim()}\u0000${disableMirror}\u0000${disableProxy}`;
+  const temporaryMirror = useTemporaryMirror ? mirrorUrl.trim() : "";
+  const currentEstimateKey = `${provider}\u0000${id.trim()}\u0000${revision.trim()}\u0000${disableMirror}\u0000${temporaryMirror}\u0000${disableProxy}`;
   const configuredMirror = serverInfo?.network?.mirrors[provider];
+  const supportsMirror = provider === "huggingface"
+    || provider === "modelscope-cn"
+    || provider === "modelscope-ai";
   const proxyConfigured = serverInfo?.network?.proxyConfigured === true;
+  const minimumScheduledAt = localDateTimeValue(new Date(Date.now() + 60_000));
   const estimateIsCurrent = estimateLookup === "ready"
     && estimateKey === currentEstimateKey
     && estimate?.downloadable === true;
@@ -248,6 +290,8 @@ export function NewTaskPage() {
           setRevision(defaultRevision(nextProvider));
           revisionEdited.current = false;
           setDisableMirror(false);
+          setUseTemporaryMirror(false);
+          setMirrorUrl("");
           invalidateEstimate();
         }}>
           {providers.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
@@ -297,29 +341,85 @@ export function NewTaskPage() {
           {provider !== "http" && revisionLookup === "idle" && "Enter a complete model ID to load hub revisions, or type a branch, tag, version or commit manually."}
         </span>
       </label>
-      {(configuredMirror || proxyConfigured) && <aside className="network-policy">
-        <div><strong>Server network routing is active</strong><span>Preflight and the actual download will use the same choices below.</span></div>
-        {configuredMirror && <label className="route-option">
-          <input type="checkbox" checked={disableMirror} onChange={(event) => {
-            setDisableMirror(event.target.checked);
-            invalidateEstimate();
-          }} />
-          <span>
-            <strong>Bypass mirror for this task</strong>
-            <small className="route-detail">
-              <span>Mirror address for {providers.find((item) => item.value === provider)?.label}</span>
-              <code title={configuredMirror}>{configuredMirror}</code>
-            </small>
-          </span>
-        </label>}
-        {proxyConfigured && <label className="route-option">
-          <input type="checkbox" checked={disableProxy} onChange={(event) => {
-            setDisableProxy(event.target.checked);
-            invalidateEstimate();
-          }} />
-          <span><strong>Bypass HTTP proxy for this task</strong><small>Server proxy: <code>{serverInfo?.network?.proxyDisplay ?? "configured"}</code></small></span>
-        </label>}
-      </aside>}
+      <details className="advanced-options">
+        <summary><span><strong>Advanced</strong><small>{configuredMirror || proxyConfigured ? "Server routing is active · routing and delayed start" : "Routing and delayed start"}</small></span></summary>
+        <div className="advanced-options-body">
+          <section className="schedule-policy">
+            <label className="route-option no-border">
+              <input type="checkbox" checked={delayDownload} onChange={(event) => {
+                const checked = event.target.checked;
+                setDelayDownload(checked);
+                if (checked && !scheduledAt) {
+                  setScheduledAt(localDateTimeValue(new Date(Date.now() + 60 * 60_000)));
+                }
+              }} />
+              <span><strong>Start this download later</strong><small>The immutable revision is locked now. ModelShelf will not poll the source while it waits.</small></span>
+            </label>
+            {delayDownload && <label className="route-input">Start time
+              <input type="datetime-local" value={scheduledAt} min={minimumScheduledAt} required onChange={(event) => setScheduledAt(event.target.value)} />
+              <small>Uses your browser's local timezone. If the server is offline, the task starts after it comes back.</small>
+            </label>}
+          </section>
+          {(supportsMirror || proxyConfigured) && <aside className="network-policy">
+            <div><strong>Network routing for this task</strong><span>Preflight and the actual download will use the same choices below.</span></div>
+            {supportsMirror && <>
+              <label className="route-option">
+                <input type="checkbox" checked={useTemporaryMirror} onChange={(event) => {
+                  const checked = event.target.checked;
+                  setUseTemporaryMirror(checked);
+                  if (checked) setDisableMirror(false);
+                  invalidateEstimate();
+                }} />
+                <span>
+                  <strong>Use a temporary mirror for this task</strong>
+                  <small>{configuredMirror
+                    ? <>This overrides the server mirror: <code>{configuredMirror}</code></>
+                    : "The address is stored with this task and does not change the server configuration."}</small>
+                </span>
+              </label>
+              {useTemporaryMirror && <label className="route-input">Temporary mirror address
+                <input
+                  type="url"
+                  value={mirrorUrl}
+                  placeholder="https://mirror.example.com"
+                  autoComplete="url"
+                  required
+                  aria-invalid={mirrorUrl.length > 0 && !isHttpUrl(mirrorUrl)}
+                  onChange={(event) => {
+                    setMirrorUrl(event.target.value);
+                    invalidateEstimate();
+                  }}
+                />
+                <small className={mirrorUrl.length > 0 && !isHttpUrl(mirrorUrl) ? "lookup-error" : ""}>
+                  {mirrorUrl.length > 0 && !isHttpUrl(mirrorUrl)
+                    ? "Enter a valid HTTP(S) URL without embedded credentials."
+                    : "HTTP(S) only. Do not include credentials in the URL."}
+                </small>
+              </label>}
+            </>}
+            {configuredMirror && !useTemporaryMirror && <label className="route-option">
+              <input type="checkbox" checked={disableMirror} onChange={(event) => {
+                setDisableMirror(event.target.checked);
+                invalidateEstimate();
+              }} />
+              <span>
+                <strong>Bypass mirror for this task</strong>
+                <small className="route-detail">
+                  <span>Mirror address for {providers.find((item) => item.value === provider)?.label}</span>
+                  <code title={configuredMirror}>{configuredMirror}</code>
+                </small>
+              </span>
+            </label>}
+            {proxyConfigured && <label className="route-option">
+              <input type="checkbox" checked={disableProxy} onChange={(event) => {
+                setDisableProxy(event.target.checked);
+                invalidateEstimate();
+              }} />
+              <span><strong>Bypass HTTP proxy for this task</strong><small>Server proxy: <code>{serverInfo?.network?.proxyDisplay ?? "configured"}</code></small></span>
+            </label>}
+          </aside>}
+        </div>
+      </details>
       <section className={`estimate-card ${estimateLookup === "error" ? "estimate-error" : ""}`} aria-live="polite">
         {estimateLookup === "idle" && <div><strong>Download preflight</strong><span>Enter a complete model ID and requested revision to validate availability and estimate its size.</span></div>}
         {estimateLookup === "loading" && <div><strong>Checking download…</strong><span>Validating access, revision and file metadata with the selected provider.</span></div>}
@@ -353,7 +453,7 @@ export function NewTaskPage() {
           ? <Link className="button existing-action" to={`/tasks/${duplicate.taskId}`}>Open existing task</Link>
           : duplicate?.kind === "artifact"
             ? <Link className="button existing-action" to="/artifacts">View artifact</Link>
-            : <button disabled={busy || !estimateIsCurrent}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : "Start download"}</button>}
+            : <button disabled={busy || !estimateIsCurrent}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : delayDownload ? "Schedule download" : "Start download"}</button>}
       </div>
     </form>
   </div>;

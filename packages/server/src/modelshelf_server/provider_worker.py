@@ -31,6 +31,7 @@ async def _main(payload: dict[str, Any]) -> None:
         "modelscope_ai_mirror": payload.get("modelscopeAiMirror"),
         "proxy_url": None,
         "disable_mirror": bool(payload.get("disableMirror")),
+        "mirror_url": payload.get("mirrorUrl"),
         "disable_proxy": False,
         "_isolated": True,
     }
@@ -99,6 +100,7 @@ def main() -> None:
                     secrets=(
                         str(payload.get("githubToken") or ""),
                         str(payload.get("proxyUrl") or ""),
+                        str(payload.get("mirrorUrl") or ""),
                     ),
                 ),
                 "statusCode": status_code,

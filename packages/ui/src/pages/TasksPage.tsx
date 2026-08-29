@@ -7,6 +7,7 @@ import { TaskPage } from "./TaskPage.tsx";
 
 const terminalStatuses = new Set<TaskStatus>(["completed", "failed", "cancelled"]);
 const activeStatuses = new Set<TaskStatus>([
+  "scheduled",
   "queued",
   "resolving",
   "downloading",
@@ -115,6 +116,7 @@ export function TasksPage() {
           <option value="active-paused">Active &amp; paused</option>
           <option value="all">All statuses</option>
           <option value="active">Active (all in-progress phases)</option>
+          <option value="scheduled">Scheduled</option>
           <option value="downloading">Downloading</option>
           <option value="paused">Paused</option>
           <option value="completed">Completed</option>
@@ -136,6 +138,7 @@ export function TasksPage() {
             <td className="task-status-cell">
               <div className="task-status-stack">
                 <span className={`badge ${task.status}`}>{task.status.replace("_", " ")}</span>
+                {task.status === "scheduled" && task.scheduledAt && <span className="task-live-metrics"><span>Starts {new Date(task.scheduledAt).toLocaleString()}</span></span>}
                 {task.status === "downloading" && <span className="task-live-metrics"><strong>{formatRate(task.instantaneousBytesPerSecond)}</strong><span aria-hidden="true">·</span><span>ETA {formatDuration(task.etaSeconds)}</span></span>}
               </div>
             </td>

@@ -3,10 +3,12 @@ from __future__ import annotations
 import threading
 import time
 import zipfile
+from datetime import UTC, datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import modelshelf_server.app as app_module
+import modelshelf_server.tasks as task_module
 import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
@@ -18,6 +20,7 @@ from modelshelf_server.providers import (
     EstimateMetadata,
     ModelOption,
     ModelSearch,
+    ProviderResult,
     RevisionDiscovery,
     RevisionOption,
 )
@@ -599,3 +602,206 @@ def test_network_configuration_is_reported_without_proxy_credentials_and_forward
     assert captured["proxy_url"] == proxy
     assert captured["disable_mirror"] is True
     assert captured["disable_proxy"] is True
+
+
+def test_temporary_mirror_overrides_server_mirror_for_preflight_and_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def fake_estimate(
+        provider: Provider,
+        source_id: str,
+        revision: str,
+        **network: object,
+    ) -> DownloadEstimate:
+        calls.append(network)
+        return DownloadEstimate(provider, source_id, revision, "a" * 40, 100, 1)
+
+    monkeypatch.setattr(app_module, "estimate_download", fake_estimate)
+    settings = Settings(
+        storage_root=tmp_path / "storage",
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+        huggingface_mirror="https://server-mirror.example",
+    )
+    headers = {"Authorization": "Bearer write-token"}
+    temporary_mirror = "https://temporary-mirror.example/"
+    with TestClient(create_app(settings)) as client:
+        estimate = client.get(
+            "/api/v1/providers/huggingface/estimate",
+            params={
+                "id": "owner/model",
+                "revision": "main",
+                "mirrorUrl": temporary_mirror,
+            },
+            headers=headers,
+        )
+        assert estimate.status_code == 200
+        created = client.post(
+            "/api/v1/tasks",
+            json={
+                "provider": "huggingface",
+                "id": "owner/model",
+                "revision": "main",
+                "mirrorUrl": temporary_mirror,
+            },
+            headers=headers,
+        )
+        assert created.status_code == 202
+        assert created.json()["mirrorUrl"] == "https://temporary-mirror.example"
+
+    assert len(calls) == 1  # The task creation reuses the current preflight cache entry.
+    assert calls[0]["huggingface_mirror"] == "https://server-mirror.example"
+    assert calls[0]["mirror_url"] == "https://temporary-mirror.example"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {"provider": "http", "mirrorUrl": "https://mirror.example"},
+            "temporary mirrors are not supported for this source",
+        ),
+        (
+            {
+                "provider": "huggingface",
+                "mirrorUrl": "https://user:password@mirror.example",
+            },
+            "temporary mirror address must not contain credentials",
+        ),
+        (
+            {
+                "provider": "huggingface",
+                "mirrorUrl": "https://mirror.example",
+                "disableMirror": True,
+            },
+            "temporary mirror and mirror bypass cannot be enabled together",
+        ),
+    ],
+)
+def test_task_rejects_invalid_temporary_mirror_routes(
+    tmp_path: Path, payload: dict[str, object], message: str
+) -> None:
+    settings = Settings(
+        storage_root=tmp_path / "storage",
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    body = {"id": "owner/model", "revision": "main", **payload}
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/tasks",
+            json=body,
+            headers={"Authorization": "Bearer write-token"},
+        )
+
+    assert response.status_code == 422
+    assert message in str(response.json()["detail"])
+
+
+def test_task_can_be_scheduled_and_started_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = "7" * 40
+
+    async def fake_estimate(
+        provider: Provider, source_id: str, revision: str, **_network: object
+    ) -> DownloadEstimate:
+        return DownloadEstimate(provider, source_id, revision, resolved, 5, 1)
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: object,
+        **_options: object,
+    ) -> ProviderResult:
+        (destination / "model.bin").write_bytes(b"model")
+        return ProviderResult(resolved_revision=resolved)
+
+    monkeypatch.setattr(app_module, "estimate_download", fake_estimate)
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    settings = Settings(
+        storage_root=tmp_path / "storage",
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    headers = {"Authorization": "Bearer write-token"}
+    scheduled_at = datetime.now(UTC) + timedelta(hours=1)
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={
+                "provider": "huggingface",
+                "id": "owner/model",
+                "revision": "main",
+                "scheduledAt": scheduled_at.isoformat(),
+            },
+            headers=headers,
+        )
+        assert created.status_code == 202
+        assert created.json()["status"] == "scheduled"
+        assert created.json()["resolvedRevision"] == resolved
+        task_id = created.json()["id"]
+
+        started = client.post(f"/api/v1/tasks/{task_id}/start", headers=headers)
+        assert started.status_code == 200
+        assert started.json()["status"] == "queued"
+
+
+def test_task_schedule_requires_an_explicit_timezone(tmp_path: Path) -> None:
+    settings = Settings(
+        storage_root=tmp_path / "storage",
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/tasks",
+            json={
+                "provider": "huggingface",
+                "id": "owner/model",
+                "revision": "main",
+                "scheduledAt": "2026-09-01T12:00:00",
+            },
+            headers={"Authorization": "Bearer write-token"},
+        )
+
+    assert response.status_code == 422
+    assert "scheduled start must include a timezone" in str(response.json()["detail"])
+
+
+def test_paused_task_can_schedule_a_delayed_resume(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    catalog = Catalog(storage)
+    catalog.initialize()
+    store = TaskStore(catalog.jobs_root)
+    task = store.create(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        resolved_revision="4" * 40,
+        total_bytes=10,
+        disable_mirror=False,
+        disable_proxy=False,
+    )
+    store.update(task.id, {"status": TaskStatus.PAUSED, "resume_from_stage": True})
+    settings = Settings(
+        storage_root=storage,
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    scheduled_at = datetime.now(UTC) + timedelta(hours=1)
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            f"/api/v1/tasks/{task.id}/resume",
+            json={"scheduledAt": scheduled_at.isoformat()},
+            headers={"Authorization": "Bearer write-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "scheduled"
+    assert response.json()["resumeFromStage"] is True
+    assert response.json()["scheduledAt"] == scheduled_at.isoformat().replace("+00:00", "Z")

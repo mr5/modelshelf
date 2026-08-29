@@ -2,6 +2,7 @@ import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, formatBytes, formatDuration, formatRate } from "../api.ts";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
+import { ResumeControl } from "../components/ResumeControl.tsx";
 import { sourceModelUrl } from "../source.ts";
 import type { DownloadTask } from "../types.ts";
 
@@ -47,7 +48,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
 
   const close = () => navigate("/tasks", { replace: true });
 
-  async function control(action: "pause" | "resume" | "cancel") {
+  async function control(action: "pause" | "cancel" | "start") {
     if (action === "cancel" && !window.confirm("Cancel this task and delete its staged files?")) {
       return;
     }
@@ -57,6 +58,23 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       setTask(await api<DownloadTask>(`/tasks/${taskId}/${action}`, { method: "POST" }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function resume(scheduledAt?: string): Promise<boolean> {
+    setActionBusy(true);
+    setError("");
+    try {
+      setTask(await api<DownloadTask>(`/tasks/${taskId}/resume`, {
+        method: "POST",
+        body: JSON.stringify(scheduledAt ? { scheduledAt } : {}),
+      }));
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
     } finally {
       setActionBusy(false);
     }
@@ -88,9 +106,11 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
   }
 
   const canPause = task.status === "queued" || task.status === "resolving" || task.status === "downloading";
-  const canCancel = canPause || task.status === "paused" || task.status === "awaiting_confirmation";
+  const canCancel = canPause || task.status === "scheduled" || task.status === "paused" || task.status === "awaiting_confirmation";
   const canDelete = task.status === "completed" || task.status === "failed" || task.status === "cancelled";
-  const eta = task.status === "paused"
+  const eta = task.status === "scheduled" && task.scheduledAt
+    ? `Starts ${new Date(task.scheduledAt).toLocaleString()}`
+    : task.status === "paused"
     ? "Paused"
     : task.status === "completed" || task.status === "awaiting_confirmation"
       ? "Done"
@@ -100,7 +120,8 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
   const transferred = task.totalBytes
     ? `${formatBytes(task.bytesDownloaded)} / ${formatBytes(task.totalBytes)}`
     : `${formatBytes(task.bytesDownloaded)} transferred`;
-  const route = task.disableMirror || task.disableProxy ? [
+  const route = task.mirrorUrl || task.disableMirror || task.disableProxy ? [
+    task.mirrorUrl ? `Temporary mirror: ${task.mirrorUrl}` : null,
     task.disableMirror ? "Mirror bypassed" : null,
     task.disableProxy ? "Proxy bypassed" : null,
   ].filter(Boolean).join(" · ") : "Server defaults";
@@ -118,7 +139,8 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
     onClose={close}
     footer={(canCancel || canDelete) && <>
       {canPause && <button className="ghost" disabled={actionBusy} onClick={() => void control("pause")}>Pause</button>}
-      {task.status === "paused" && <button disabled={actionBusy} onClick={() => void control("resume")}>Resume</button>}
+      {task.status === "scheduled" && <button disabled={actionBusy} onClick={() => void control("start")}>Start now</button>}
+      {task.status === "paused" && <ResumeControl disabled={actionBusy} onResume={resume} />}
       {canCancel && <button className="danger" disabled={actionBusy} onClick={() => void control("cancel")}>Cancel task</button>}
       {canDelete && <DeleteConfirm
         triggerLabel="Delete task"
@@ -153,6 +175,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       <Detail label="Requested revision" value={task.requestedRevision} mono />
       <Detail label="Resolved revision" value={task.resolvedRevision ?? "Pending resolution"} mono />
       <Detail label="Created" value={new Date(task.createdAt).toLocaleString()} />
+      {task.status === "scheduled" && task.scheduledAt && <Detail label="Scheduled start" value={new Date(task.scheduledAt).toLocaleString()} />}
       <Detail label="Network route" value={route} />
     </section>
 

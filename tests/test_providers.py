@@ -326,6 +326,7 @@ def test_sdk_downloads_use_a_supervised_worker(
     async def fake_isolated(*args: object, **kwargs: object) -> ProviderResult:
         captured["provider"] = args[0]
         captured["direct"] = kwargs["direct"]
+        captured["mirror_url"] = kwargs["mirror_url"]
         return ProviderResult(resolved_revision="a" * 40)
 
     monkeypatch.setattr(provider_module, "_isolated_download", fake_isolated)
@@ -338,11 +339,16 @@ def test_sdk_downloads_use_a_supervised_worker(
             tmp_path / "artifact",
             lambda _downloaded, _total: asyncio.sleep(0),
             github_token=None,
+            mirror_url="https://temporary-modelscope.example",
         )
 
     result = asyncio.run(exercise())
     assert result.resolved_revision == "a" * 40
-    assert captured == {"provider": Provider.MODELSCOPE_CN, "direct": False}
+    assert captured == {
+        "provider": Provider.MODELSCOPE_CN,
+        "direct": False,
+        "mirror_url": "https://temporary-modelscope.example",
+    }
 
 
 def test_kaggle_latest_is_resolved_from_official_cache_path(
@@ -524,14 +530,24 @@ def test_huggingface_model_search_and_revision_discovery(
             huggingface_mirror="https://mirror.example",
             disable_mirror=True,
         )
+        temporary = await estimate_download(
+            Provider.HUGGINGFACE,
+            "owner/tiny-model",
+            "main",
+            github_token=None,
+            huggingface_mirror="https://mirror.example",
+            mirror_url="https://temporary-mirror.example",
+        )
         assert mirrored.hub_url == "https://huggingface.co/owner/tiny-model/tree/main"
         assert direct.hub_url == mirrored.hub_url
+        assert temporary.hub_url == mirrored.hub_url
 
     asyncio.run(run())
     assert estimate_endpoints == [
         "https://huggingface.co",
         "https://mirror.example",
         "https://huggingface.co",
+        "https://temporary-mirror.example",
     ]
 
 

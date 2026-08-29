@@ -68,18 +68,31 @@ class TaskStore:
         total_bytes: int | None,
         disable_mirror: bool,
         disable_proxy: bool,
+        mirror_url: str | None = None,
+        scheduled_at: datetime | None = None,
     ) -> DownloadTask:
         now = datetime.now(UTC)
+        if scheduled_at is not None:
+            if scheduled_at.tzinfo is None or scheduled_at.utcoffset() is None:
+                raise ValueError("scheduled start must include a timezone")
+            scheduled_at = scheduled_at.astimezone(UTC)
+        initial_status = (
+            TaskStatus.SCHEDULED
+            if scheduled_at is not None and scheduled_at > now
+            else TaskStatus.QUEUED
+        )
         task = DownloadTask(
-            schema_version=1,
+            schema_version=2,
             id=str(uuid4()),
             provider=provider,
             source_id=source_id,
             requested_revision=requested_revision,
             resolved_revision=resolved_revision,
             disable_mirror=disable_mirror,
+            mirror_url=mirror_url,
             disable_proxy=disable_proxy,
-            status=TaskStatus.QUEUED,
+            scheduled_at=scheduled_at,
+            status=initial_status,
             progress=0,
             total_bytes=total_bytes,
             created_at=now,
@@ -99,16 +112,18 @@ class TaskStore:
         *,
         disable_mirror: bool,
         disable_proxy: bool,
+        mirror_url: str | None = None,
     ) -> DownloadTask:
         now = datetime.now(UTC)
         task = DownloadTask(
-            schema_version=1,
+            schema_version=2,
             id=str(uuid4()),
             provider=provider,
             source_id=source_id,
             requested_revision=requested_revision,
             resolved_revision=resolved_revision,
             disable_mirror=disable_mirror,
+            mirror_url=mirror_url,
             disable_proxy=disable_proxy,
             status=TaskStatus.COMPLETED,
             progress=100,
@@ -200,6 +215,7 @@ class TaskManager:
         self.scheduler: asyncio.Task[None] | None = None
         self._pending: deque[str] = deque()
         self._active_runs: dict[str, asyncio.Task[None]] = {}
+        self._scheduled_runs: dict[str, asyncio.Task[None]] = {}
         self._active_by_source: dict[Provider, int] = {}
         self._scheduler_wakeup = asyncio.Event()
         self._resume_from_stage: set[str] = set()
@@ -224,13 +240,20 @@ class TaskManager:
         for task in stored_tasks:
             if task.status is TaskStatus.CANCELLED:
                 shutil.rmtree(self.catalog.staging_path(task.id), ignore_errors=True)
+        scheduled_tasks = [task for task in stored_tasks if task.status is TaskStatus.SCHEDULED]
+        for task in scheduled_tasks:
+            self._arm_scheduled_task(task)
         tasks = [task for task in stored_tasks if task.status in recoverable]
         tasks.sort(key=lambda task: (task.status is TaskStatus.QUEUED, task.created_at))
         for task in tasks:
             if task.status is not TaskStatus.QUEUED:
                 self.store.update(
                     task.id,
-                    {"status": TaskStatus.QUEUED, "progress": 0},
+                    {
+                        "status": TaskStatus.QUEUED,
+                        "progress": 0,
+                        "resume_from_stage": True,
+                    },
                 )
                 self._resume_from_stage.add(task.id)
             self.queue.put_nowait(task.id)
@@ -244,11 +267,64 @@ class TaskManager:
             self.scheduler.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.scheduler
+        scheduled = list(self._scheduled_runs.values())
+        for task in scheduled:
+            task.cancel()
+        if scheduled:
+            await asyncio.gather(*scheduled, return_exceptions=True)
+        self._scheduled_runs.clear()
         active = list(self._active_runs.values())
         for task in active:
             task.cancel()
         if active:
             await asyncio.gather(*active, return_exceptions=True)
+
+    def _arm_scheduled_task(self, task: DownloadTask) -> None:
+        if task.scheduled_at is None:
+            raise ValueError("scheduled task is missing scheduled_at")
+        previous = self._scheduled_runs.pop(task.id, None)
+        if previous is not None:
+            previous.cancel()
+        waiter = asyncio.create_task(
+            self._wait_for_scheduled_task(task.id, task.scheduled_at),
+            name=f"modelshelf-scheduled-{task.id}",
+        )
+        self._scheduled_runs[task.id] = waiter
+
+        def finished(completed: asyncio.Task[None]) -> None:
+            if self._scheduled_runs.get(task.id) is completed:
+                self._scheduled_runs.pop(task.id, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        waiter.add_done_callback(finished)
+
+    async def _wait_for_scheduled_task(self, task_id: str, scheduled_at: datetime) -> None:
+        delay = max(0.0, (scheduled_at - datetime.now(UTC)).total_seconds())
+        await asyncio.sleep(delay)
+        async with self._update_lock:
+            current = self.store.get(task_id)
+            if current is None or current.status is not TaskStatus.SCHEDULED:
+                return
+            self.store.update(task_id, {"status": TaskStatus.QUEUED})
+        await self.queue.put(task_id)
+        self._scheduler_wakeup.set()
+
+    async def start_now(self, task_id: str) -> DownloadTask:
+        queued = await self._transition(
+            task_id,
+            {TaskStatus.SCHEDULED},
+            "started immediately",
+            status=TaskStatus.QUEUED,
+        )
+        waiter = self._scheduled_runs.pop(task_id, None)
+        if waiter is not None:
+            waiter.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await waiter
+        await self.queue.put(task_id)
+        self._scheduler_wakeup.set()
+        return queued
 
     async def pause(self, task_id: str) -> DownloadTask:
         paused = await self._transition(
@@ -256,6 +332,7 @@ class TaskManager:
             {TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING},
             "paused",
             status=TaskStatus.PAUSED,
+            resume_from_stage=True,
         )
         timing = self._download_timing.get(task_id)
         baseline = self._download_baselines.get(task_id)
@@ -267,19 +344,32 @@ class TaskManager:
         self._scheduler_wakeup.set()
         return await self._stop_metrics(paused.id, timing=timing, baseline=baseline)
 
-    async def resume(self, task_id: str) -> DownloadTask:
-        self._resume_from_stage.add(task_id)
+    async def resume(
+        self, task_id: str, *, scheduled_at: datetime | None = None
+    ) -> DownloadTask:
+        if scheduled_at is not None:
+            if scheduled_at.tzinfo is None or scheduled_at.utcoffset() is None:
+                raise ValueError("scheduled resume must include a timezone")
+            scheduled_at = scheduled_at.astimezone(UTC)
+        delayed = scheduled_at is not None and scheduled_at > datetime.now(UTC)
+        if not delayed:
+            self._resume_from_stage.add(task_id)
         try:
             resumed = await self._transition(
                 task_id,
                 {TaskStatus.PAUSED},
-                "resumed",
-                status=TaskStatus.QUEUED,
+                "scheduled for resume" if delayed else "resumed",
+                status=TaskStatus.SCHEDULED if delayed else TaskStatus.QUEUED,
+                scheduled_at=scheduled_at if delayed else None,
+                resume_from_stage=True,
                 error=None,
             )
         except Exception:
             self._resume_from_stage.discard(task_id)
             raise
+        if delayed:
+            self._arm_scheduled_task(resumed)
+            return resumed
         await self.queue.put(task_id)
         self._scheduler_wakeup.set()
         return resumed
@@ -289,6 +379,7 @@ class TaskManager:
             task_id,
             {
                 TaskStatus.QUEUED,
+                TaskStatus.SCHEDULED,
                 TaskStatus.RESOLVING,
                 TaskStatus.DOWNLOADING,
                 TaskStatus.PAUSED,
@@ -305,6 +396,9 @@ class TaskManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await active
         self._scheduler_wakeup.set()
+        scheduled = self._scheduled_runs.pop(task_id, None)
+        if scheduled is not None:
+            scheduled.cancel()
         self._resume_from_stage.discard(task_id)
         shutil.rmtree(self.catalog.staging_path(task_id), ignore_errors=True)
         return await self._stop_metrics(
@@ -340,6 +434,7 @@ class TaskManager:
         *,
         resolved_revision: str | None,
         disable_mirror: bool = False,
+        mirror_url: str | None = None,
         disable_proxy: bool = False,
     ) -> DuplicateIngestion | None:
         if not resolved_revision:
@@ -367,6 +462,7 @@ class TaskManager:
 
         reusable_statuses = {
             TaskStatus.QUEUED,
+            TaskStatus.SCHEDULED,
             TaskStatus.RESOLVING,
             TaskStatus.DOWNLOADING,
             TaskStatus.VERIFYING,
@@ -383,6 +479,7 @@ class TaskManager:
                 and task.source_id == source_id
                 and task.resolved_revision == resolved_revision
                 and task.disable_mirror == disable_mirror
+                and task.mirror_url == mirror_url
                 and task.disable_proxy == disable_proxy
             ),
             None,
@@ -400,7 +497,9 @@ class TaskManager:
         resolved_revision: str | None = None,
         total_bytes: int | None = None,
         disable_mirror: bool = False,
+        mirror_url: str | None = None,
         disable_proxy: bool = False,
+        scheduled_at: datetime | None = None,
     ) -> TaskCreationResult:
         async with self._create_lock:
             duplicate = self.find_duplicate(
@@ -409,6 +508,7 @@ class TaskManager:
                 requested_revision,
                 resolved_revision=resolved_revision,
                 disable_mirror=disable_mirror,
+                mirror_url=mirror_url,
                 disable_proxy=disable_proxy,
             )
             if duplicate is not None:
@@ -428,6 +528,7 @@ class TaskManager:
                         duplicate.artifact_id,
                         duplicate.artifact_total_size,
                         disable_mirror=disable_mirror,
+                        mirror_url=mirror_url,
                         disable_proxy=disable_proxy,
                     )
                     return TaskCreationResult(completed, "artifact")
@@ -439,10 +540,15 @@ class TaskManager:
                 resolved_revision=resolved_revision,
                 total_bytes=total_bytes,
                 disable_mirror=disable_mirror,
+                mirror_url=mirror_url,
                 disable_proxy=disable_proxy,
+                scheduled_at=scheduled_at,
             )
-            await self.queue.put(task.id)
-            self._scheduler_wakeup.set()
+            if task.status is TaskStatus.SCHEDULED:
+                self._arm_scheduled_task(task)
+            else:
+                await self.queue.put(task.id)
+                self._scheduler_wakeup.set()
             return TaskCreationResult(task)
 
     async def create(
@@ -454,7 +560,9 @@ class TaskManager:
         resolved_revision: str | None = None,
         total_bytes: int | None = None,
         disable_mirror: bool = False,
+        mirror_url: str | None = None,
         disable_proxy: bool = False,
+        scheduled_at: datetime | None = None,
     ) -> DownloadTask:
         return (
             await self.create_with_result(
@@ -464,7 +572,9 @@ class TaskManager:
                 resolved_revision=resolved_revision,
                 total_bytes=total_bytes,
                 disable_mirror=disable_mirror,
+                mirror_url=mirror_url,
                 disable_proxy=disable_proxy,
+                scheduled_at=scheduled_at,
             )
         ).task
 
@@ -636,11 +746,13 @@ class TaskManager:
         if task is None:
             return
         stage = self.catalog.staging_path(task_id)
-        resume_from_stage = task_id in self._resume_from_stage
+        resume_from_stage = task.resume_from_stage or task_id in self._resume_from_stage
         self._resume_from_stage.discard(task_id)
         try:
             if not resume_from_stage:
                 shutil.rmtree(stage, ignore_errors=True)
+            elif task.resume_from_stage:
+                task = self.store.update(task_id, {"resume_from_stage": False})
             stage.mkdir(parents=True, exist_ok=True)
             await self._update(task_id, status=TaskStatus.RESOLVING, progress=1, error=None)
             download_root = (
@@ -672,6 +784,7 @@ class TaskManager:
                 modelscope_ai_mirror=self.modelscope_ai_mirror,
                 proxy_url=self.proxy_url,
                 disable_mirror=task.disable_mirror,
+                mirror_url=task.mirror_url,
                 disable_proxy=task.disable_proxy,
                 expected_resolved_revision=task.resolved_revision,
             )

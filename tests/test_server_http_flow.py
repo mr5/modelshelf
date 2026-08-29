@@ -28,6 +28,66 @@ from modelshelf_server.providers import (
 from modelshelf_server.tasks import TaskStore
 
 
+def test_queued_and_paused_tasks_can_be_reordered_through_the_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = tmp_path / "storage"
+    catalog = Catalog(storage)
+    catalog.initialize()
+    store = TaskStore(catalog.jobs_root)
+    first = store.create(
+        Provider.HUGGINGFACE,
+        "owner/first",
+        "main",
+        resolved_revision="a" * 40,
+        total_bytes=5,
+        disable_mirror=False,
+        disable_proxy=False,
+        queue_position=0,
+    )
+    second = store.create(
+        Provider.HUGGINGFACE,
+        "owner/second",
+        "main",
+        resolved_revision="b" * 40,
+        total_bytes=5,
+        disable_mirror=False,
+        disable_proxy=False,
+        queue_position=1,
+    )
+    store.update(second.id, {"status": TaskStatus.PAUSED})
+
+    async def no_lifecycle_work(_manager: object) -> None:
+        return None
+
+    monkeypatch.setattr(task_module.TaskManager, "start", no_lifecycle_work)
+    monkeypatch.setattr(task_module.TaskManager, "stop", no_lifecycle_work)
+    settings = Settings(
+        storage_root=storage,
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    headers = {"Authorization": "Bearer write-token"}
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/tasks/reorder",
+            json={"orderedTaskIds": [second.id, first.id]},
+            headers=headers,
+        )
+        stale = client.post(
+            "/api/v1/tasks/reorder",
+            json={"orderedTaskIds": [first.id]},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    assert [task["id"] for task in response.json()] == [second.id, first.id]
+    assert [task["queuePosition"] for task in response.json()] == [0, 1]
+    assert [task["status"] for task in response.json()] == ["paused", "queued"]
+    assert stale.status_code == 409
+    assert "queue changed" in stale.json()["detail"]
+
+
 def test_delete_endpoints_require_write_access_and_remove_owned_data(tmp_path: Path) -> None:
     storage = tmp_path / "storage"
     catalog = Catalog(storage)

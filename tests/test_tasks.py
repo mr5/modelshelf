@@ -189,7 +189,7 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     loaded = manager.store.get(task_id)
     assert loaded is not None
     assert loaded.mirror_url is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 3
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 4
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 1
@@ -199,13 +199,120 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     assert migrated is not None
     assert migrated.mirror_url is None
     assert migrated.scheduled_at is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 3
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 4
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
-    document["schemaVersion"] = 4
+    document["schemaVersion"] = 5
     task_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
         manager.store.list()
+
+
+def test_reordered_queue_is_persisted_and_controls_download_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execution_order: list[str] = []
+
+    async def fake_provider(
+        _provider: Provider,
+        source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: Progress,
+        **_options: object,
+    ) -> ProviderResult:
+        execution_order.append(source_id)
+        (destination / "model.bin").write_bytes(b"model")
+        suffix = source_id.rsplit("-", 1)[-1]
+        return ProviderResult(resolved_revision=suffix * 40)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    seed = TaskManager(catalog, github_token=None)
+
+    async def create_and_reorder() -> list[str]:
+        tasks = [
+            await seed.create(
+                Provider.HUGGINGFACE,
+                f"owner/model-{suffix}",
+                "main",
+                resolved_revision=suffix * 40,
+            )
+            for suffix in ("a", "b", "c")
+        ]
+        ordered_ids = [tasks[2].id, tasks[0].id, tasks[1].id]
+        reordered = seed.reorder_queued(ordered_ids)
+        assert [task.id for task in reordered] == ordered_ids
+        assert [task.queue_position for task in reordered] == [0, 1, 2]
+        return ordered_ids
+
+    ordered_ids = asyncio.run(create_and_reorder())
+    restarted = TaskManager(
+        catalog,
+        github_token=None,
+        max_concurrent_downloads=1,
+        max_concurrent_downloads_per_source=1,
+    )
+
+    async def execute() -> None:
+        await restarted.start()
+        try:
+            await asyncio.wait_for(restarted.queue.join(), timeout=2)
+        finally:
+            await restarted.stop()
+
+    asyncio.run(execute())
+
+    assert execution_order == ["owner/model-c", "owner/model-a", "owner/model-b"]
+    assert all(restarted.store.get(task_id) is not None for task_id in ordered_ids)
+
+
+def test_reorder_rejects_a_stale_or_partial_queue(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def create() -> tuple[str, str]:
+        first = await manager.create(Provider.HTTP, "https://example.test/first", "content")
+        second = await manager.create(Provider.HTTP, "https://example.test/second", "content")
+        return first.id, second.id
+
+    first_id, second_id = asyncio.run(create())
+
+    with pytest.raises(ValueError, match="queue changed"):
+        manager.reorder_queued([second_id])
+    with pytest.raises(ValueError, match="duplicate"):
+        manager.reorder_queued([first_id, first_id])
+
+
+def test_paused_task_keeps_its_priority_when_reordered_and_resumed(
+    tmp_path: Path,
+) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        first = await manager.create(Provider.HTTP, "https://example.test/first", "content")
+        second = await manager.create(Provider.HTTP, "https://example.test/second", "content")
+
+        paused = await manager.pause(second.id)
+        assert paused.status is TaskStatus.PAUSED
+        assert paused.queue_position == second.queue_position
+
+        reordered = manager.reorder_queued([second.id, first.id])
+        assert [task.status for task in reordered] == [
+            TaskStatus.PAUSED,
+            TaskStatus.QUEUED,
+        ]
+        assert [task.queue_position for task in reordered] == [0, 1]
+
+        resumed = await manager.resume(second.id)
+        assert resumed.status is TaskStatus.QUEUED
+        assert resumed.queue_position == 0
+
+    asyncio.run(exercise())
 
 
 def test_create_reuses_existing_artifact_without_downloading(tmp_path: Path) -> None:

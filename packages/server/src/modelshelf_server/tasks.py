@@ -71,6 +71,7 @@ class TaskStore:
         disable_proxy: bool,
         mirror_url: str | None = None,
         scheduled_at: datetime | None = None,
+        queue_position: int | None = None,
         selected_paths: list[str] | None = None,
     ) -> DownloadTask:
         now = datetime.now(UTC)
@@ -94,6 +95,7 @@ class TaskStore:
             mirror_url=mirror_url,
             disable_proxy=disable_proxy,
             scheduled_at=scheduled_at,
+            queue_position=queue_position if initial_status is TaskStatus.QUEUED else None,
             selected_paths=selected_paths,
             status=initial_status,
             progress=0,
@@ -232,6 +234,20 @@ class TaskManager:
         self._download_baselines: dict[str, tuple[int, float]] = {}
         self._progress_samples: dict[str, tuple[float, int]] = {}
         self._speed_ema: dict[str, float] = {}
+        positions = [
+            task.queue_position for task in self.store.list() if task.queue_position is not None
+        ]
+        self._next_queue_position = max(positions, default=-1) + 1
+
+    def _claim_queue_position(self) -> int:
+        position = self._next_queue_position
+        self._next_queue_position += 1
+        return position
+
+    @staticmethod
+    def _queue_order(task: DownloadTask) -> tuple[int, datetime]:
+        position = task.queue_position if task.queue_position is not None else 2**63 - 1
+        return position, task.created_at
 
     async def start(self) -> None:
         recoverable = {
@@ -248,20 +264,36 @@ class TaskManager:
         scheduled_tasks = [task for task in stored_tasks if task.status is TaskStatus.SCHEDULED]
         for task in scheduled_tasks:
             self._arm_scheduled_task(task)
-        tasks = [task for task in stored_tasks if task.status in recoverable]
-        tasks.sort(key=lambda task: (task.status is TaskStatus.QUEUED, task.created_at))
-        for task in tasks:
-            if task.status is not TaskStatus.QUEUED:
+        interrupted = sorted(
+            (task for task in stored_tasks if task.status in recoverable - {TaskStatus.QUEUED}),
+            key=lambda task: task.created_at,
+        )
+        pending = sorted(
+            (
+                task
+                for task in stored_tasks
+                if task.status in {TaskStatus.QUEUED, TaskStatus.PAUSED}
+            ),
+            key=self._queue_order,
+        )
+        tasks = [*interrupted, *pending]
+        for position, task in enumerate(tasks):
+            if task.status in recoverable - {TaskStatus.QUEUED}:
                 self.store.update(
                     task.id,
                     {
                         "status": TaskStatus.QUEUED,
                         "progress": 0,
+                        "queue_position": position,
                         "resume_from_stage": True,
                     },
                 )
                 self._resume_from_stage.add(task.id)
-            self.queue.put_nowait(task.id)
+            elif task.queue_position != position:
+                self.store.update(task.id, {"queue_position": position})
+            if task.status is not TaskStatus.PAUSED:
+                self.queue.put_nowait(task.id)
+        self._next_queue_position = max(self._next_queue_position, len(tasks))
         self.scheduler = asyncio.create_task(
             self._schedule(), name="modelshelf-ingestion-scheduler"
         )
@@ -311,7 +343,13 @@ class TaskManager:
             current = self.store.get(task_id)
             if current is None or current.status is not TaskStatus.SCHEDULED:
                 return
-            self.store.update(task_id, {"status": TaskStatus.QUEUED})
+            self.store.update(
+                task_id,
+                {
+                    "status": TaskStatus.QUEUED,
+                    "queue_position": self._claim_queue_position(),
+                },
+            )
         await self.queue.put(task_id)
         self._scheduler_wakeup.set()
 
@@ -321,6 +359,8 @@ class TaskManager:
             {TaskStatus.SCHEDULED},
             "started immediately",
             status=TaskStatus.QUEUED,
+            queue_position=self._claim_queue_position(),
+            scheduled_at=None,
         )
         waiter = self._scheduled_runs.pop(task_id, None)
         if waiter is not None:
@@ -332,11 +372,18 @@ class TaskManager:
         return queued
 
     async def pause(self, task_id: str) -> DownloadTask:
+        current = self.store.get(task_id)
+        queue_position = (
+            current.queue_position
+            if current is not None and current.queue_position is not None
+            else self._claim_queue_position()
+        )
         paused = await self._transition(
             task_id,
             {TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING},
             "paused",
             status=TaskStatus.PAUSED,
+            queue_position=queue_position,
             resume_from_stage=True,
         )
         timing = self._download_timing.get(task_id)
@@ -357,6 +404,12 @@ class TaskManager:
         delayed = scheduled_at is not None and scheduled_at > datetime.now(UTC)
         if not delayed:
             self._resume_from_stage.add(task_id)
+        current = self.store.get(task_id)
+        queue_position = (
+            current.queue_position
+            if current is not None and current.queue_position is not None
+            else self._claim_queue_position()
+        )
         try:
             resumed = await self._transition(
                 task_id,
@@ -364,6 +417,7 @@ class TaskManager:
                 "scheduled for resume" if delayed else "resumed",
                 status=TaskStatus.SCHEDULED if delayed else TaskStatus.QUEUED,
                 scheduled_at=scheduled_at if delayed else None,
+                queue_position=None if delayed else queue_position,
                 resume_from_stage=True,
                 error=None,
             )
@@ -390,6 +444,7 @@ class TaskManager:
             },
             "cancelled",
             status=TaskStatus.CANCELLED,
+            queue_position=None,
         )
         timing = self._download_timing.get(task_id)
         baseline = self._download_baselines.get(task_id)
@@ -551,6 +606,7 @@ class TaskManager:
                 mirror_url=mirror_url,
                 disable_proxy=disable_proxy,
                 scheduled_at=scheduled_at,
+                queue_position=self._claim_queue_position(),
                 selected_paths=selected_paths,
             )
             if task.status is TaskStatus.SCHEDULED:
@@ -588,6 +644,29 @@ class TaskManager:
                 selected_paths=selected_paths,
             )
         ).task
+
+    def reorder_queued(self, ordered_task_ids: list[str]) -> list[DownloadTask]:
+        if len(ordered_task_ids) != len(set(ordered_task_ids)):
+            raise ValueError("queue order contains duplicate task IDs")
+        pending = [
+            task
+            for task in self.store.list()
+            if task.status in {TaskStatus.QUEUED, TaskStatus.PAUSED}
+        ]
+        pending_by_id = {task.id: task for task in pending}
+        if set(ordered_task_ids) != set(pending_by_id):
+            raise ValueError("download queue changed; refresh the task list and try again")
+
+        reordered: list[DownloadTask] = []
+        for position, task_id in enumerate(ordered_task_ids):
+            task = pending_by_id[task_id]
+            reordered.append(
+                task
+                if task.queue_position == position
+                else self.store.update(task_id, {"queue_position": position})
+            )
+        self._scheduler_wakeup.set()
+        return reordered
 
     async def _update(self, task_id: str, **values: Any) -> DownloadTask:
         async with self._update_lock:
@@ -699,6 +778,7 @@ class TaskManager:
             raise asyncio.CancelledError
 
     def _next_schedulable(self) -> tuple[str, Provider] | None:
+        selected: tuple[int, DownloadTask] | None = None
         index = 0
         while index < len(self._pending):
             task_id = self._pending[index]
@@ -707,14 +787,18 @@ class TaskManager:
                 del self._pending[index]
                 self.queue.task_done()
                 continue
-            if (
-                self._active_by_source.get(task.provider, 0)
-                < self.max_concurrent_downloads_per_source
+            if self._active_by_source.get(
+                task.provider, 0
+            ) < self.max_concurrent_downloads_per_source and (
+                selected is None or self._queue_order(task) < self._queue_order(selected[1])
             ):
-                del self._pending[index]
-                return task_id, task.provider
+                selected = index, task
             index += 1
-        return None
+        if selected is None:
+            return None
+        selected_index, task = selected
+        del self._pending[selected_index]
+        return task.id, task.provider
 
     async def _execute_queued(self, task_id: str, provider: Provider) -> None:
         try:
@@ -765,7 +849,13 @@ class TaskManager:
             elif task.resume_from_stage:
                 task = self.store.update(task_id, {"resume_from_stage": False})
             stage.mkdir(parents=True, exist_ok=True)
-            await self._update(task_id, status=TaskStatus.RESOLVING, progress=1, error=None)
+            await self._update(
+                task_id,
+                status=TaskStatus.RESOLVING,
+                progress=1,
+                queue_position=None,
+                error=None,
+            )
             download_root = (
                 stage / "download" if task.provider is Provider.HTTP else stage / "artifact"
             )

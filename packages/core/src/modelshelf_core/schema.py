@@ -95,6 +95,12 @@ def _task_v2_to_v3(document: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _task_v3_to_v4(document: dict[str, Any]) -> dict[str, Any]:
+    result = dict(document)
+    result.setdefault("queuePosition", None)
+    return result
+
+
 def _manifest_v1_to_v2(document: dict[str, Any]) -> dict[str, Any]:
     result = dict(document)
     source = dict(result.get("source") or {})
@@ -108,7 +114,12 @@ def load_task_json(raw: str) -> tuple[DownloadTask, bool]:
         _json_object(raw, "download task"),
         document_name="download task",
         current_version=TASK_SCHEMA_VERSION,
-        migrations={0: _task_v0_to_v1, 1: _task_v1_to_v2, 2: _task_v2_to_v3},
+        migrations={
+            0: _task_v0_to_v1,
+            1: _task_v1_to_v2,
+            2: _task_v2_to_v3,
+            3: _task_v3_to_v4,
+        },
         missing_version=0,
     )
     return DownloadTask.model_validate(document), migrated

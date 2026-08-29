@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MANIFEST_SCHEMA_VERSION: Literal[2] = 2
-TASK_SCHEMA_VERSION: Literal[3] = 3
+TASK_SCHEMA_VERSION: Literal[4] = 4
 STORAGE_LAYOUT_SCHEMA_VERSION: Literal[1] = 1
 
 
@@ -139,7 +139,7 @@ class InferredMetadata(Model):
 
 
 class DownloadTask(Model):
-    schema_version: Literal[3]
+    schema_version: Literal[4]
     id: str
     provider: Provider
     source_id: str
@@ -148,6 +148,7 @@ class DownloadTask(Model):
     mirror_url: str | None = None
     disable_proxy: bool = False
     scheduled_at: datetime | None = None
+    queue_position: int | None = Field(default=None, ge=0)
     resume_from_stage: bool = False
     selected_paths: list[str] | None = None
     resolved_revision: str | None = None

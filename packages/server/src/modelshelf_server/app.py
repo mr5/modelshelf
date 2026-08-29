@@ -125,6 +125,19 @@ class CreateTaskRequest(BaseModel):
         return self
 
 
+class ReorderTasksRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    ordered_task_ids: list[str] = Field(alias="orderedTaskIds")
+
+    @field_validator("ordered_task_ids")
+    @classmethod
+    def validate_ordered_task_ids(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("queued task order contains duplicate task IDs")
+        return value
+
+
 def _selected_estimate(
     estimate: DownloadEstimate, selected_paths: list[str] | None
 ) -> tuple[list[str] | None, int | None, int | None]:
@@ -740,6 +753,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return [
             item.model_dump(mode="json", by_alias=True, exclude_none=True)
             for item in manager.store.list()
+        ]
+
+    @app.post("/api/v1/tasks/reorder", dependencies=[Depends(require_write)])
+    async def reorder_tasks(body: ReorderTasksRequest) -> list[dict[str, Any]]:
+        try:
+            reordered = manager.reorder_queued(body.ordered_task_ids)
+        except ValueError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        return [
+            item.model_dump(mode="json", by_alias=True, exclude_none=True) for item in reordered
         ]
 
     @app.get("/api/v1/tasks/{task_id}", dependencies=[Depends(require_write)])

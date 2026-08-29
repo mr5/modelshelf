@@ -117,6 +117,7 @@ export interface DownloadTask {
   mirrorUrl?: string;
   disableProxy?: boolean;
   scheduledAt?: string;
+  queuePosition?: number;
   resumeFromStage?: boolean;
   selectedPaths?: string[];
   resolvedRevision?: string;

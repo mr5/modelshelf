@@ -1073,6 +1073,24 @@ def _direct_worker_environment() -> dict[str, str]:
     return environment
 
 
+def _download_worker_environment(
+    provider: Provider,
+    *,
+    direct: bool,
+    huggingface_mirror: str | None,
+    disable_mirror: bool,
+    mirror_url: str | None,
+) -> dict[str, str]:
+    environment = _direct_worker_environment() if direct else os.environ.copy()
+    effective_huggingface_mirror = mirror_url or huggingface_mirror
+    if provider is Provider.HUGGINGFACE and effective_huggingface_mirror and not disable_mirror:
+        # Hugging Face's Xet transport exchanges its token through the configured endpoint,
+        # then downloads large payloads directly from Hugging Face CAS. That bypasses HTTP
+        # mirrors such as Olah, including their cache and upstream routing policy.
+        environment["HF_HUB_DISABLE_XET"] = "1"
+    return environment
+
+
 def _worker_error(record: dict[str, Any]) -> Exception:
     message = safe_error_message(str(record.get("message") or "isolated provider operation failed"))
     kind = record.get("errorKind")
@@ -1217,7 +1235,13 @@ async def _isolated_download(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=_direct_worker_environment() if direct else os.environ.copy(),
+        env=_download_worker_environment(
+            provider,
+            direct=direct,
+            huggingface_mirror=huggingface_mirror,
+            disable_mirror=disable_mirror,
+            mirror_url=mirror_url,
+        ),
     )
     assert process.stdin is not None
     assert process.stdout is not None

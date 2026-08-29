@@ -64,6 +64,54 @@ def test_empty_huggingface_token_is_treated_as_anonymous(
     assert provider_module._huggingface_token() == "hf_test_token"
 
 
+@pytest.mark.parametrize(
+    ("configured_mirror", "temporary_mirror", "disable_mirror", "expected"),
+    [
+        ("https://mirror.example", None, False, "1"),
+        (None, "https://task-mirror.example", False, "1"),
+        ("https://mirror.example", None, True, None),
+        (None, None, False, None),
+    ],
+)
+def test_huggingface_mirror_download_disables_xet_in_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_mirror: str | None,
+    temporary_mirror: str | None,
+    disable_mirror: bool,
+    expected: str | None,
+) -> None:
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
+
+    environment = provider_module._download_worker_environment(
+        Provider.HUGGINGFACE,
+        direct=False,
+        huggingface_mirror=configured_mirror,
+        disable_mirror=disable_mirror,
+        mirror_url=temporary_mirror,
+    )
+
+    assert environment.get("HF_HUB_DISABLE_XET") == expected
+
+
+def test_huggingface_direct_mirror_download_disables_xet_and_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
+
+    environment = provider_module._download_worker_environment(
+        Provider.HUGGINGFACE,
+        direct=True,
+        huggingface_mirror="https://mirror.example",
+        disable_mirror=False,
+        mirror_url=None,
+    )
+
+    assert environment["HF_HUB_DISABLE_XET"] == "1"
+    assert "HTTPS_PROXY" not in environment
+    assert environment["NO_PROXY"] == "*"
+
+
 def test_huggingface_selected_download_passes_exact_allow_patterns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

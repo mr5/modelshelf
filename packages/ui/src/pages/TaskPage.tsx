@@ -48,16 +48,15 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
 
   const close = () => navigate("/tasks", { replace: true });
 
-  async function control(action: "pause" | "cancel" | "start") {
-    if (action === "cancel" && !window.confirm("Cancel this task and delete its staged files?")) {
-      return;
-    }
+  async function control(action: "pause" | "cancel" | "start"): Promise<boolean> {
     setActionBusy(true);
     setError("");
     try {
       setTask(await api<DownloadTask>(`/tasks/${taskId}/${action}`, { method: "POST" }));
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
     } finally {
       setActionBusy(false);
     }
@@ -152,7 +151,16 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       {canPause && <button className="ghost" disabled={actionBusy} onClick={() => void control("pause")}>Pause</button>}
       {task.status === "scheduled" && <button disabled={actionBusy} onClick={() => void control("start")}>Start now</button>}
       {task.status === "paused" && <ResumeControl disabled={actionBusy} onResume={resume} />}
-      {canCancel && <button className="danger" disabled={actionBusy} onClick={() => void control("cancel")}>Cancel task</button>}
+      {canCancel && <DeleteConfirm
+        triggerLabel="Cancel task"
+        triggerClassName="danger"
+        title="Cancel this task?"
+        description="The task will stop and its downloaded staging files will be permanently removed."
+        confirmLabel="Cancel task"
+        busyLabel="Cancelling…"
+        disabled={actionBusy}
+        onConfirm={() => control("cancel")}
+      />}
       {canDelete && <DeleteConfirm
         triggerLabel="Delete task"
         triggerClassName="danger"

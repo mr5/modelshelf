@@ -30,6 +30,20 @@ const providers: Array<{ value: Provider; label: string }> = [
 
 type StatusFilter = "active-paused" | "active" | TaskStatus | "all";
 
+function taskProgressText(task: DownloadTask): string {
+  if (task.status === "verifying") {
+    if (task.verificationTotalBytes === undefined) {
+      return task.verificationBytesCompleted
+        ? `${formatBytes(task.verificationBytesCompleted)} verified`
+        : "Preparing verification…";
+    }
+    return `${formatBytes(task.verificationBytesCompleted ?? 0)} / ${formatBytes(task.verificationTotalBytes)}`;
+  }
+  return task.totalBytes
+    ? `${formatBytes(task.bytesDownloaded)} / ${formatBytes(task.totalBytes)}`
+    : `${formatBytes(task.bytesDownloaded)} transferred`;
+}
+
 export function TasksPage() {
   const { id: selectedTaskId } = useParams();
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
@@ -255,7 +269,7 @@ export function TasksPage() {
               </div>
             </td>
             <td><span className="mono truncate" title={task.resolvedRevision ?? task.requestedRevision}>{task.resolvedRevision ?? task.requestedRevision}</span></td>
-            <td className="task-progress-cell"><div className="progress" aria-label={`${task.progress}% complete`}><span style={{ width: `${task.progress}%` }} /></div><span className="subline">{task.totalBytes ? `${formatBytes(task.bytesDownloaded)} / ${formatBytes(task.totalBytes)}` : `${formatBytes(task.bytesDownloaded)} transferred`}</span></td>
+            <td className="task-progress-cell"><div className="progress" aria-label={`${task.progress}% complete`}><span style={{ width: `${task.progress}%` }} /></div><span className="subline">{taskProgressText(task)}</span></td>
             <td className="task-updated">{new Date(task.updatedAt).toLocaleString()}</td>
             <td className="task-row-actions">{terminalStatuses.has(task.status) && <DeleteConfirm
               triggerLabel="Delete"

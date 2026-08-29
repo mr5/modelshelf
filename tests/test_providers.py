@@ -117,20 +117,30 @@ def test_huggingface_selected_download_passes_exact_allow_patterns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, object] = {}
+    progress_updates: list[tuple[int, int | None]] = []
 
     def snapshot_download(**kwargs: object) -> str:
         captured.update(kwargs)
         destination = Path(str(kwargs["local_dir"]))
         destination.mkdir(parents=True, exist_ok=True)
         (destination / "model.gguf").write_bytes(b"model")
+        cache = destination / ".cache" / "huggingface"
+        cache.mkdir(parents=True)
+        (cache / "temporary.incomplete").write_bytes(b"temporary cache")
         return str(destination)
+
+    async def progress(downloaded: int, total: int | None) -> None:
+        progress_updates.append((downloaded, total))
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
     monkeypatch.setattr(
         huggingface_hub,
         "HfApi",
         lambda **_kwargs: SimpleNamespace(
-            model_info=lambda *_args, **_kwargs: SimpleNamespace(sha="a" * 40)
+            model_info=lambda *_args, **_kwargs: SimpleNamespace(
+                sha="a" * 40,
+                siblings=[SimpleNamespace(rfilename="model.gguf", size=5)],
+            )
         ),
     )
     result = asyncio.run(
@@ -138,7 +148,7 @@ def test_huggingface_selected_download_passes_exact_allow_patterns(
             "owner/model",
             "a" * 40,
             tmp_path / "artifact",
-            lambda _downloaded, _total: asyncio.sleep(0),
+            progress,
             "https://huggingface.co",
             ["model.gguf"],
         )
@@ -146,6 +156,52 @@ def test_huggingface_selected_download_passes_exact_allow_patterns(
 
     assert result.resolved_revision == "a" * 40
     assert captured["allow_patterns"] == ["model.gguf"]
+    assert progress_updates[-1] == (5, 5)
+    assert not (tmp_path / "artifact" / ".cache" / "huggingface").exists()
+
+
+def test_huggingface_estimate_falls_back_to_expanded_tree_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class Api:
+        def model_info(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                sha="b" * 40,
+                siblings=[
+                    SimpleNamespace(rfilename="config.json", size=None),
+                    SimpleNamespace(rfilename="model.safetensors", size=None),
+                ],
+                pipeline_tag="text-generation",
+                library_name="transformers",
+                last_modified=None,
+            )
+
+        def list_repo_tree(self, *_args: object, **kwargs: object) -> list[SimpleNamespace]:
+            calls.append(kwargs)
+            return [
+                SimpleNamespace(path="config.json", size=7),
+                SimpleNamespace(path="model.safetensors", size=1_000),
+            ]
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda **_kwargs: Api())
+
+    estimate = asyncio.run(
+        provider_module._estimate_huggingface(
+            "owner/model",
+            "main",
+            "https://mirror.example",
+        )
+    )
+
+    assert estimate.total_size == 1_007
+    assert estimate.file_count == 2
+    assert [(file.path, file.size) for file in estimate.files] == [
+        ("config.json", 7),
+        ("model.safetensors", 1_000),
+    ]
+    assert calls == [{"revision": "b" * 40, "recursive": True, "expand": True}]
 
 
 def test_modelscope_authentication_error_names_the_selected_site_token() -> None:

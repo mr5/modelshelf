@@ -422,14 +422,18 @@ async def _blocking_download(
     destination: Path,
     progress: Progress,
     measure: Callable[[Path], int] = _directory_size,
+    *,
+    total_bytes: int | None = None,
+    report_final: bool = True,
 ) -> str:
     future = asyncio.create_task(asyncio.to_thread(operation))
     while not future.done():
-        await progress(measure(destination), None)
+        await progress(measure(destination), total_bytes)
         await asyncio.sleep(0.5)
     result = await future
-    final_size = _directory_size(destination)
-    await progress(final_size, final_size)
+    if report_final:
+        final_size = measure(destination)
+        await progress(final_size, total_bytes if total_bytes is not None else final_size)
     return result
 
 
@@ -825,19 +829,47 @@ async def discover_revisions(
     )
 
 
+def _huggingface_tree_files(api: Any, source_id: str, revision: str) -> tuple[SourceFile, ...]:
+    files = tuple(
+        SourceFile(str(getattr(item, "path", "")), getattr(item, "size", None))
+        for item in api.list_repo_tree(
+            source_id,
+            revision=revision,
+            recursive=True,
+            expand=True,
+        )
+        if getattr(item, "path", None) and isinstance(getattr(item, "size", None), int)
+    )
+    if not files:
+        raise RuntimeError("Hugging Face did not return file sizes for this revision")
+    return files
+
+
 async def _estimate_huggingface(source_id: str, revision: str, endpoint: str) -> DownloadEstimate:
     try:
         from huggingface_hub import HfApi
     except ImportError as error:
         raise _optional_import_error("Hugging Face", "huggingface-hub", error) from error
+    api = HfApi(endpoint=endpoint, token=_huggingface_token())
     info = await asyncio.to_thread(
-        HfApi(endpoint=endpoint, token=_huggingface_token()).model_info,
+        api.model_info,
         source_id,
         revision=revision,
         files_metadata=True,
     )
-    siblings = list(info.siblings or [])
-    sizes = [getattr(item, "size", None) for item in siblings]
+    files = tuple(
+        SourceFile(str(getattr(item, "rfilename", "")), getattr(item, "size", None))
+        for item in (info.siblings or [])
+        if getattr(item, "rfilename", None)
+    )
+    if not files or any(file.size is None for file in files):
+        files = await asyncio.to_thread(
+            _huggingface_tree_files,
+            api,
+            source_id,
+            info.sha or revision,
+        )
+    sizes = [file.size for file in files]
     total_size = (
         sum(size for size in sizes if isinstance(size, int))
         if all(isinstance(size, int) for size in sizes)
@@ -849,18 +881,14 @@ async def _estimate_huggingface(source_id: str, revision: str, endpoint: str) ->
         revision,
         info.sha,
         total_size,
-        len(siblings),
+        len(files),
         (f"{OFFICIAL_HUGGINGFACE_ENDPOINT}/{source_id}/tree/{quote(revision, safe='')}"),
         _metadata(
             ("Task", getattr(info, "pipeline_tag", None)),
             ("Library", getattr(info, "library_name", None)),
             ("Last modified", getattr(info, "last_modified", None)),
         ),
-        tuple(
-            SourceFile(str(getattr(item, "rfilename", "")), getattr(item, "size", None))
-            for item in siblings
-            if getattr(item, "rfilename", None)
-        ),
+        files,
     )
 
 
@@ -1377,14 +1405,30 @@ async def download_huggingface(
     except ImportError as error:
         raise _optional_import_error("Hugging Face", "huggingface-hub", error) from error
     token = _huggingface_token()
+    api = HfApi(endpoint=endpoint, token=token)
     info = await asyncio.to_thread(
-        HfApi(endpoint=endpoint, token=token).model_info,
+        api.model_info,
         source_id,
         revision=revision,
+        files_metadata=True,
     )
     resolved = info.sha
     if not resolved:
         raise RuntimeError("Hugging Face did not return an immutable commit SHA")
+    files = tuple(
+        SourceFile(str(getattr(item, "rfilename", "")), getattr(item, "size", None))
+        for item in (info.siblings or [])
+        if getattr(item, "rfilename", None)
+    )
+    if not files or any(file.size is None for file in files):
+        files = await asyncio.to_thread(_huggingface_tree_files, api, source_id, resolved)
+    selected = set(selected_paths) if selected_paths else None
+    selected_files = [file for file in files if selected is None or file.path in selected]
+    known_total = (
+        sum(file.size for file in selected_files if file.size is not None)
+        if selected_files and all(file.size is not None for file in selected_files)
+        else None
+    )
 
     def operation() -> str:
         return snapshot_download(
@@ -1400,10 +1444,18 @@ async def download_huggingface(
         )
 
     try:
-        await _blocking_download(operation, destination, progress)
+        await _blocking_download(
+            operation,
+            destination,
+            progress,
+            total_bytes=known_total,
+            report_final=False,
+        )
     finally:
         shutil.rmtree(cache, ignore_errors=True)
         shutil.rmtree(destination / ".cache" / "huggingface", ignore_errors=True)
+    final_size = _directory_size(destination)
+    await progress(final_size, known_total if known_total is not None else final_size)
     return ProviderResult(resolved_revision=resolved)
 
 

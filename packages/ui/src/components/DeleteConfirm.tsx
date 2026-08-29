@@ -8,6 +8,7 @@ export function DeleteConfirm({
   confirmLabel,
   onConfirm,
   optionLabel,
+  busyLabel = "Deleting…",
   disabled = false,
   triggerClassName = "ghost danger-text small",
 }: {
@@ -17,6 +18,7 @@ export function DeleteConfirm({
   confirmLabel: string;
   onConfirm: (optionChecked: boolean) => Promise<boolean>;
   optionLabel?: string;
+  busyLabel?: string;
   disabled?: boolean;
   triggerClassName?: string;
 }) {
@@ -118,7 +120,7 @@ export function DeleteConfirm({
       {optionLabel && <label className="delete-popover-option"><input type="checkbox" checked={optionChecked} disabled={busy} onChange={(event) => setOptionChecked(event.target.checked)} /><span>{optionLabel}</span></label>}
       <div className="delete-popover-actions">
         <button className="ghost small" disabled={busy} onClick={() => { setOpen(false); setOptionChecked(false); triggerRef.current?.focus(); }}>Cancel</button>
-        <button className="danger small" disabled={busy} onClick={() => void confirm()}>{busy ? "Deleting…" : confirmLabel}</button>
+        <button className="danger small" disabled={busy} onClick={() => void confirm()}>{busy ? busyLabel : confirmLabel}</button>
       </div>
     </div>, document.body)}
   </span>;

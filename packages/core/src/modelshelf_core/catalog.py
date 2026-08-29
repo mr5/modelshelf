@@ -115,15 +115,10 @@ def _artifact_manifest_paths(root: Path) -> Iterator[Path]:
 
 
 class Catalog:
-    def __init__(self, storage_root: Path, *, artifact_storage_root: Path | None = None) -> None:
+    def __init__(self, storage_root: Path) -> None:
         self.storage_root = storage_root.resolve()
-        self.artifact_storage_root = (
-            artifact_storage_root.resolve()
-            if artifact_storage_root is not None
-            else self.storage_root
-        )
-        self.artifacts_root = self.artifact_storage_root / "artifacts"
-        self.staging_root = self.artifact_storage_root / ".staging"
+        self.artifacts_root = self.storage_root / "artifacts"
+        self.staging_root = self.storage_root / ".staging"
         self.incoming_root = self.storage_root / ".incoming"
         self.jobs_root = self.storage_root / ".modelshelf" / "jobs"
         self.layout_path = self.storage_root / ".modelshelf" / "storage.json"

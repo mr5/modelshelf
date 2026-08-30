@@ -76,6 +76,7 @@ tbody tr:hover { background:#fbfcfa; }
 .task-live-metrics strong { color:#34413d; font-size:12px; font-weight:750; }
 .task-progress-cell .progress { width:100%; max-width:230px; }
 .task-progress-cell .subline { white-space:nowrap; }
+.task-progress-state { color:#34413d; font-size:12px; font-weight:750; }
 .task-updated { color:var(--muted); font-size:13px; line-height:1.4; }
 .task-row-actions { padding-left:8px; padding-right:12px; text-align:right; }
 .task-row-actions button { padding-left:8px; padding-right:8px; }
@@ -240,13 +241,31 @@ input:focus, select:focus { border-color:var(--green); box-shadow:0 0 0 3px rgba
 .modal-close:focus-visible { outline:3px solid rgba(22,116,90,.18); border-color:var(--green); }
 .task-modal-body { min-height:0; overflow-y:auto; padding:22px 24px 24px; display:grid; gap:16px; }
 .modal-loading { min-height:180px; display:grid; place-items:center; color:var(--muted); }
+.task-steps { display:flex; align-items:flex-start; margin:0; padding:2px 5px 0; list-style:none; }
+.task-step { position:relative; flex:1 1 0; min-width:0; display:grid; justify-items:center; gap:7px; color:#89938f; }
+.task-step:not(:first-child)::before { content:""; position:absolute; top:12px; right:50%; width:100%; height:2px; background:#dfe5e1; }
+.task-step.complete:not(:first-child)::before, .task-step.active:not(:first-child)::before, .task-step.paused:not(:first-child)::before, .task-step.waiting:not(:first-child)::before, .task-step.failed:not(:first-child)::before, .task-step.cancelled:not(:first-child)::before { background:#86b9a8; }
+.task-step-marker { position:relative; z-index:1; width:25px; height:25px; display:grid; place-items:center; border:2px solid #d8dfda; border-radius:50%; background:#fdfefd; color:#7a8580; font-size:10px; font-weight:850; }
+.task-step-label { overflow:hidden; max-width:100%; text-overflow:ellipsis; color:inherit; font-size:10px; font-weight:750; text-transform:uppercase; letter-spacing:.045em; white-space:nowrap; }
+.task-step.complete { color:#286f59; }
+.task-step.complete .task-step-marker { border-color:#2f856a; background:#2f856a; color:white; }
+.task-step.active { color:var(--green-dark); }
+.task-step.active .task-step-marker { border-color:var(--green); background:#e3f2eb; color:var(--green-dark); box-shadow:0 0 0 4px rgba(22,116,90,.09); }
+.task-step.paused { color:#8b5e00; }
+.task-step.paused .task-step-marker { border-color:#d9a63a; background:#fff0c8; color:#8b5e00; }
+.task-step.waiting { color:#6543a3; }
+.task-step.waiting .task-step-marker { border-color:#9b82ce; background:#eee8ff; color:#6543a3; }
+.task-step.failed { color:#a62f26; }
+.task-step.failed .task-step-marker { border-color:#d65d53; background:#fee5e3; color:#a62f26; }
+.task-step.cancelled { color:#59615d; }
+.task-step.cancelled .task-step-marker { border-color:#89918d; background:#eceeed; color:#59615d; }
 .task-progress-card { padding:18px; display:grid; gap:13px; border:1px solid #d5e2da; border-radius:13px; background:#f3f8f4; }
 .task-progress-summary { display:flex; align-items:baseline; justify-content:space-between; gap:18px; }
 .task-progress-summary span, .task-metrics span, .task-meta > span, .task-published > span { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.065em; font-weight:750; }
 .task-progress-summary strong { font-size:19px; letter-spacing:-.02em; }
 .task-progress-row { min-width:0; display:grid; grid-template-columns:minmax(0, 1fr) auto; align-items:center; gap:14px; }
 .progress.indeterminate { overflow:hidden; }
-.progress.indeterminate i { width:32% !important; animation:verification-indeterminate 1.4s ease-in-out infinite; }
+.progress.indeterminate i, .progress.indeterminate span { width:32% !important; animation:verification-indeterminate 1.4s ease-in-out infinite; }
 @keyframes verification-indeterminate { from { transform:translateX(-120%); } to { transform:translateX(340%); } }
 .task-progress-percent { min-width:46px; color:var(--green-dark); font-size:17px; text-align:right; white-space:nowrap; }
 .task-metrics { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }

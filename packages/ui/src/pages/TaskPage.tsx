@@ -1,9 +1,10 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, formatBytes, formatDuration, formatRate } from "../api.ts";
+import { api, formatDuration, formatRate } from "../api.ts";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
 import { ResumeControl } from "../components/ResumeControl.tsx";
 import { sourceModelUrl } from "../source.ts";
+import { taskStepProgress, taskSteps, type TaskStepView } from "../taskProgress.ts";
 import type { DownloadTask } from "../types.ts";
 
 export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (taskId: string) => void }) {
@@ -108,9 +109,9 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
   const canPause = task.status === "queued" || task.status === "resolving" || task.status === "downloading" || isVerifying;
   const canCancel = canPause || task.status === "scheduled" || task.status === "paused" || task.status === "awaiting_confirmation";
   const canDelete = task.status === "completed" || task.status === "failed" || task.status === "cancelled";
-  const eta = isVerifying
-    ? formatDuration(task.verificationEtaSeconds)
-    : task.status === "scheduled" && task.scheduledAt
+  const activity = taskStepProgress(task);
+  const isVerificationActivity = activity.step === "verifying";
+  const eta = task.status === "scheduled" && task.scheduledAt
     ? `Starts ${new Date(task.scheduledAt).toLocaleString()}`
     : task.status === "paused"
     ? "Paused"
@@ -118,18 +119,8 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       ? "Done"
       : task.status === "failed" || task.status === "cancelled"
         ? "—"
-        : formatDuration(task.etaSeconds);
-  const transferred = task.totalBytes
-    ? `${formatBytes(task.bytesDownloaded)} / ${formatBytes(task.totalBytes)}`
-    : `${formatBytes(task.bytesDownloaded)} transferred`;
-  const verificationCompleted = task.verificationBytesCompleted ?? 0;
-  const verificationTotal = task.verificationTotalBytes;
-  const activityLabel = isVerifying ? (task.verificationDetail ?? "Verifying") : "Transferred";
-  const activityValue = isVerifying
-    ? verificationTotal === undefined
-      ? (verificationCompleted > 0 ? `${formatBytes(verificationCompleted)} verified` : "In progress")
-      : `${formatBytes(verificationCompleted)} / ${formatBytes(verificationTotal)}`
-    : transferred;
+        : formatDuration(isVerificationActivity ? task.verificationEtaSeconds : task.etaSeconds);
+  const steps = taskSteps(task);
   const route = task.mirrorUrl || task.disableMirror || task.disableProxy ? [
     task.mirrorUrl ? `Temporary mirror: ${task.mirrorUrl}` : null,
     task.disableMirror ? "Mirror bypassed" : null,
@@ -177,17 +168,22 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       />}
     </>}
   >
+    <TaskSteps steps={steps} />
+
     <section className="task-progress-card">
-      <div className="task-progress-summary"><span>{activityLabel}</span><strong>{activityValue}</strong></div>
-      <div className="task-progress-row">
-        <div className={`progress big ${isVerifying && verificationTotal === undefined ? "indeterminate" : ""}`} aria-label={`${task.progress}% complete`}><i style={{ width: `${task.progress}%` }} /></div>
-        <strong className="task-progress-percent">{task.progress}%</strong>
-      </div>
-      <div className="task-metrics">
-        <Metric label={isVerifying ? "Verification speed" : "Instant speed"} value={formatRate(isVerifying ? task.verificationInstantaneousBytesPerSecond : task.instantaneousBytesPerSecond)} />
-        <Metric label={isVerifying ? "Average verification speed" : "Average speed"} value={formatRate(isVerifying ? task.verificationAverageBytesPerSecond : task.averageBytesPerSecond)} />
+      <div className="task-progress-summary"><span>{activity.label}</span><strong>{activity.value}</strong></div>
+      {activity.showBar && <div className="task-progress-row">
+        <div
+          className={`progress big ${activity.indeterminate ? "indeterminate" : ""}`}
+          aria-label={activity.percent === undefined ? `${activity.label}, in progress` : `${activity.label}, ${activity.percent}% complete`}
+        ><i style={{ width: `${activity.percent ?? 0}%` }} /></div>
+        <strong className="task-progress-percent">{activity.percent === undefined ? "—" : `${activity.percent}%`}</strong>
+      </div>}
+      {(activity.step === "downloading" || activity.step === "verifying" || task.status === "completed") && <div className="task-metrics">
+        <Metric label={isVerificationActivity ? "Verification speed" : "Instant speed"} value={formatRate(isVerificationActivity ? task.verificationInstantaneousBytesPerSecond : task.instantaneousBytesPerSecond)} />
+        <Metric label={isVerificationActivity ? "Average verification speed" : "Average speed"} value={formatRate(isVerificationActivity ? task.verificationAverageBytesPerSecond : task.averageBytesPerSecond)} />
         <Metric label="ETA" value={eta} />
-      </div>
+      </div>}
     </section>
 
     <section className="task-meta-grid">
@@ -208,6 +204,15 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
     {task.artifactId && <div className="task-published"><span>Published artifact</span><code>{task.artifactId}</code></div>}
     {task.status === "awaiting_confirmation" && <Confirmation task={task} onConfirmed={setTask} />}
   </ModalFrame>;
+}
+
+function TaskSteps({ steps }: { steps: TaskStepView[] }) {
+  return <ol className="task-steps" aria-label="Ingestion steps">
+    {steps.map((step, index) => <li className={`task-step ${step.state}`} key={step.key} aria-current={step.state !== "pending" && step.state !== "complete" ? "step" : undefined}>
+      <span className="task-step-marker" aria-hidden="true">{step.state === "complete" ? "✓" : index + 1}</span>
+      <span className="task-step-label">{step.label}</span>
+    </li>)}
+  </ol>;
 }
 
 function ModalFrame({ title, titleUrl, eyebrow, status, onClose, footer, children }: {

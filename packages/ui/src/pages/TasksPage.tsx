@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import type { DragEvent } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, formatBytes, formatDuration, formatRate } from "../api.ts";
+import { api, formatDuration, formatRate } from "../api.ts";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
+import { taskStepProgress } from "../taskProgress.ts";
 import type { DownloadTask, Provider, ServerInfo, TaskStatus } from "../types.ts";
 import { TaskPage } from "./TaskPage.tsx";
 
@@ -29,20 +30,6 @@ const providers: Array<{ value: Provider; label: string }> = [
 ];
 
 type StatusFilter = "active-paused" | "active" | TaskStatus | "all";
-
-function taskProgressText(task: DownloadTask): string {
-  if (task.status === "verifying") {
-    if (task.verificationTotalBytes === undefined) {
-      return task.verificationBytesCompleted
-        ? `${formatBytes(task.verificationBytesCompleted)} verified`
-        : "Preparing verification…";
-    }
-    return `${formatBytes(task.verificationBytesCompleted ?? 0)} / ${formatBytes(task.verificationTotalBytes)}`;
-  }
-  return task.totalBytes
-    ? `${formatBytes(task.bytesDownloaded)} / ${formatBytes(task.totalBytes)}`
-    : `${formatBytes(task.bytesDownloaded)} transferred`;
-}
 
 export function TasksPage() {
   const { id: selectedTaskId } = useParams();
@@ -269,7 +256,7 @@ export function TasksPage() {
               </div>
             </td>
             <td><span className="mono truncate" title={task.resolvedRevision ?? task.requestedRevision}>{task.resolvedRevision ?? task.requestedRevision}</span></td>
-            <td className="task-progress-cell"><div className="progress" aria-label={`${task.progress}% complete`}><span style={{ width: `${task.progress}%` }} /></div><span className="subline">{taskProgressText(task)}</span></td>
+            <TaskProgressCell task={task} />
             <td className="task-updated">{new Date(task.updatedAt).toLocaleString()}</td>
             <td className="task-row-actions">{terminalStatuses.has(task.status) && <DeleteConfirm
               triggerLabel="Delete"
@@ -292,4 +279,17 @@ export function TasksPage() {
       {selectedTaskId && <TaskPage taskId={selectedTaskId} onDeleted={taskDeleted} />}
     </div>
   );
+}
+
+function TaskProgressCell({ task }: { task: DownloadTask }) {
+  const activity = taskStepProgress(task);
+  return <td className="task-progress-cell">
+    {activity.showBar
+      ? <div
+          className={`progress ${activity.indeterminate ? "indeterminate" : ""}`}
+          aria-label={activity.percent === undefined ? `${activity.label}, in progress` : `${activity.label}, ${activity.percent}% complete`}
+        ><span style={{ width: `${activity.percent ?? 0}%` }} /></div>
+      : <span className="task-progress-state">{activity.label}</span>}
+    <span className="subline">{activity.value}</span>
+  </td>;
 }

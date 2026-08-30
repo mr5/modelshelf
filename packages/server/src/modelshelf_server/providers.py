@@ -258,10 +258,11 @@ class DownloadEstimate:
         if self.hub_url:
             result["hubUrl"] = self.hub_url
         selectable = self.provider in MODELSCOPE_PROVIDERS | {Provider.HUGGINGFACE}
-        variants = discover_gguf_variants(self.files) if selectable else ()
-        result["ggufVariantSelectionAvailable"] = bool(variants)
-        if variants:
-            result["ggufVariants"] = [variant.as_dict() for variant in variants]
+        gguf_variants = discover_gguf_variants(self.files) if selectable else ()
+        result["fileSelectionAvailable"] = selectable and bool(self.files)
+        result["ggufVariantSelectionAvailable"] = bool(gguf_variants)
+        if gguf_variants:
+            result["ggufVariants"] = [variant.as_dict() for variant in gguf_variants]
             auxiliary = [
                 file.as_dict()
                 for file in self.files
@@ -273,6 +274,10 @@ class DownloadEstimate:
             ]
             if auxiliary:
                 result["ggufAuxiliaryFiles"] = auxiliary
+        elif selectable and self.files:
+            result["selectableFiles"] = [
+                file.as_dict() for file in sorted(self.files, key=lambda item: item.path.casefold())
+            ]
         return result
 
 

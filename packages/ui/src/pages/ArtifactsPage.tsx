@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { siGithub, siHuggingface, siKaggle, siModelscope } from "simple-icons";
 import { api, formatBytes } from "../api.ts";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
+import { ArtifactFileTree } from "../components/ArtifactFileTree.tsx";
+import { selectionSummary } from "../selection.ts";
 import { sourceModelUrl } from "../source.ts";
-import type { ArtifactSummary, Provider } from "../types.ts";
+import type { ArtifactDetail, ArtifactSummary, Provider } from "../types.ts";
 
 const pageSize = 48;
 
@@ -56,10 +59,12 @@ function artifactsPath(query: string, provider: Provider | "", sort: SortOption,
 }
 
 function artifactAlias(item: ArtifactSummary): string {
-  return item.name
-    .normalize("NFKD")
-    .replace(/[^a-zA-Z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "model";
+  return item.alias ?? (
+    item.name
+      .normalize("NFKD")
+      .replace(/[^a-zA-Z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "model"
+  );
 }
 
 function shellArgument(value: string): string {
@@ -101,6 +106,8 @@ function modelConfig(item: ArtifactSummary): string {
 }
 
 export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
+  const navigate = useNavigate();
+  const { artifactId } = useParams<{ artifactId: string }>();
   const [query, setQuery] = useState("");
   const [provider, setProvider] = useState<Provider | "">("");
   const [sort, setSort] = useState<SortOption>("created:desc");
@@ -110,6 +117,11 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState<{ artifactId: string; kind: "command" | "config" }>();
   const [deletingArtifactId, setDeletingArtifactId] = useState<string>();
+  const [artifactDetail, setArtifactDetail] = useState<ArtifactDetail>();
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+  const [aliasInput, setAliasInput] = useState("");
+  const [savingAlias, setSavingAlias] = useState(false);
   useEffect(() => {
     let active = true;
     const timer = window.setTimeout(() => {
@@ -133,6 +145,40 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
       window.clearTimeout(timer);
     };
   }, [query, provider, sort]);
+
+  useEffect(() => {
+    if (!artifactId) {
+      setArtifactDetail(undefined);
+      setDetailError("");
+      return;
+    }
+    let active = true;
+    setArtifactDetail(undefined);
+    setDetailLoading(true);
+    setDetailError("");
+    void api<ArtifactDetail>(`/artifacts/${encodeURIComponent(artifactId)}`)
+      .then((result) => {
+        if (!active) return;
+        setArtifactDetail(result);
+        setAliasInput(result.summary.alias ?? "");
+      })
+      .catch((cause) => {
+        if (active) setDetailError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => {
+        if (active) setDetailLoading(false);
+      });
+    return () => { active = false; };
+  }, [artifactId]);
+
+  useEffect(() => {
+    if (!artifactId) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") navigate("/artifacts");
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [artifactId, navigate]);
 
   async function loadMore() {
     setLoading(true);
@@ -165,12 +211,33 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
     try {
       await api<void>(`/artifacts/${encodeURIComponent(item.artifactId)}`, { method: "DELETE" });
       setItems((current) => current.filter((candidate) => candidate.artifactId !== item.artifactId));
+      if (artifactId === item.artifactId) navigate("/artifacts");
       return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       return false;
     } finally {
       setDeletingArtifactId(undefined);
+    }
+  }
+
+  async function saveAlias() {
+    if (!artifactDetail) return;
+    setSavingAlias(true);
+    setDetailError("");
+    try {
+      const alias = aliasInput.trim() || null;
+      const summary = await api<ArtifactSummary>(`/artifacts/${encodeURIComponent(artifactDetail.summary.artifactId)}/alias`, {
+        method: "PUT",
+        body: JSON.stringify({ alias }),
+      });
+      setArtifactDetail((current) => current ? { ...current, summary } : current);
+      setItems((current) => current.map((item) => item.artifactId === summary.artifactId ? summary : item));
+      setAliasInput(summary.alias ?? "");
+    } catch (cause) {
+      setDetailError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingAlias(false);
     }
   }
 
@@ -198,7 +265,7 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
       const commandCopied = copied?.artifactId === item.artifactId && copied.kind === "command";
       const configCopied = copied?.artifactId === item.artifactId && copied.kind === "config";
       return <article className="artifact-card" key={item.artifactId}>
-        <div className="artifact-title-row"><h2>{item.name}</h2><div className="artifact-title-controls"><span className="immutable-badge"><span aria-hidden="true">◆</span> Immutable</span>{canManage && <details className="artifact-overflow"><summary aria-label={`More actions for ${item.name}`}>•••</summary><div className="artifact-menu" role="menu"><DeleteConfirm
+        <div className="artifact-title-row"><div className="artifact-card-heading"><h2>{item.alias ?? item.name}</h2>{item.alias && <span title={item.sourceId}>{item.name}</span>}</div><div className="artifact-title-controls"><span className="immutable-badge"><span aria-hidden="true">◆</span> Immutable</span>{canManage && <details className="artifact-overflow"><summary aria-label={`More actions for ${item.alias ?? item.name}`}>•••</summary><div className="artifact-menu" role="menu"><button type="button" className="ghost" onClick={() => navigate(`/artifacts/${encodeURIComponent(item.artifactId)}`)}>{item.alias ? "Change alias" : "Set alias"}</button><DeleteConfirm
           triggerLabel="Delete artifact"
           triggerClassName="danger-text artifact-delete-menu-item"
           title={`Delete ${item.name}?`}
@@ -210,14 +277,42 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
         {sourceUrl
           ? <a className="artifact-source" href={sourceUrl} target="_blank" rel="noreferrer">{item.sourceId} <span aria-hidden="true">↗</span></a>
           : <span className="artifact-source">{item.sourceId}</span>}
-        <dl><div><dt>Source</dt><dd className="artifact-source-meta"><SourceLogo provider={item.provider} /><span>{providerLabel(item.provider)}</span></dd></div><div><dt>Resolved revision</dt><dd className="mono truncate" title={item.resolvedRevision}>{item.resolvedRevision}</dd></div><div><dt>Content</dt><dd>{item.fileCount.toLocaleString()} files · {formatBytes(item.totalSize)}{item.selectedPaths ? " · GGUF variant" : ""}</dd></div><div><dt>Added to shelf</dt><dd>{new Date(item.createdAt).toLocaleString()}</dd></div></dl>
+        <dl><div><dt>Source</dt><dd className="artifact-source-meta"><SourceLogo provider={item.provider} /><span>{providerLabel(item.provider)}</span></dd></div><div><dt>Resolved revision</dt><dd className="mono truncate" title={item.resolvedRevision}>{item.resolvedRevision}</dd></div><div><dt>Content</dt><dd>{item.fileCount.toLocaleString()} files · {formatBytes(item.totalSize)}</dd></div><div><dt>Selection</dt><dd className="truncate" title={selectionSummary(item.selectedPaths)}>{selectionSummary(item.selectedPaths)}</dd></div><div><dt>Added to shelf</dt><dd>{new Date(item.createdAt).toLocaleString()}</dd></div></dl>
         <div className="artifact-actions">
           <div className="artifact-command"><code title={command}>{command}</code><button className="ghost" aria-label={`Copy modelshelf add command for ${item.name}`} onClick={() => void copyText(item, "command", command)}>{commandCopied ? "Copied" : "Copy"}</button></div>
-          <button className="ghost artifact-action" onClick={() => void copyText(item, "config", modelConfig(item))} title="Copy this model entry, pinned to the resolved revision">{configCopied ? "Copied" : "Copy model config"}</button>
+          <div className="artifact-secondary-actions"><button className="ghost artifact-action" onClick={() => navigate(`/artifacts/${encodeURIComponent(item.artifactId)}`)}>View details</button><button className="ghost artifact-action" onClick={() => void copyText(item, "config", modelConfig(item))} title="Copy this model entry, pinned to the resolved revision">{configCopied ? "Copied" : "Copy model config"}</button></div>
         </div>
       </article>;
     })}</div>
     {hasMore && <div className="load-more"><button onClick={() => void loadMore()} disabled={loading}>{loading ? "Loading…" : "Load more"}</button></div>}
     {!loading && items.length === 0 && <div className="empty"><h2>No matching artifacts</h2><p>Completed downloads will appear here.</p></div>}
+    {artifactId && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) navigate("/artifacts"); }}>
+      <section className="task-modal artifact-detail-modal" role="dialog" aria-modal="true" aria-labelledby="artifact-modal-title">
+        <header className="task-modal-header">
+          <div className="task-modal-heading"><p className="eyebrow">Artifact details</p><h2 id="artifact-modal-title">{artifactDetail?.summary.alias ?? artifactDetail?.summary.name ?? "Artifact"}</h2>{artifactDetail?.summary.alias && <p className="artifact-modal-model-name">{artifactDetail.summary.name}</p>}</div>
+          <div className="task-modal-header-actions"><span className="immutable-badge"><span aria-hidden="true">◆</span> Immutable</span><button className="modal-close" aria-label="Close artifact details" autoFocus onClick={() => navigate("/artifacts")}>×</button></div>
+        </header>
+        <div className="task-modal-body">
+          {detailLoading && <div className="modal-loading">Loading artifact details…</div>}
+          {detailError && <div className="error-box">{detailError}</div>}
+          {artifactDetail && <>
+            {canManage && <section className="artifact-alias-editor"><div><span>Alias</span><small>A unique, mutable label for this immutable artifact. It does not change its identity or storage path.</small></div><div><input value={aliasInput} maxLength={128} placeholder="Optional artifact alias" onChange={(event) => setAliasInput(event.target.value)} /><button type="button" disabled={savingAlias || aliasInput.trim() === (artifactDetail.summary.alias ?? "")} onClick={() => void saveAlias()}>{savingAlias ? "Saving…" : artifactDetail.summary.alias && !aliasInput.trim() ? "Remove alias" : "Save alias"}</button></div></section>}
+            <div className="task-meta-grid">
+              <div className="task-meta"><span>Source</span><strong>{sourceModelUrl(artifactDetail.summary.provider, artifactDetail.summary.sourceId, artifactDetail.summary.resolvedRevision)
+                ? <a className="artifact-detail-source" href={sourceModelUrl(artifactDetail.summary.provider, artifactDetail.summary.sourceId, artifactDetail.summary.resolvedRevision)!} target="_blank" rel="noreferrer">{providerLabel(artifactDetail.summary.provider)} · {artifactDetail.summary.sourceId} ↗</a>
+                : `${providerLabel(artifactDetail.summary.provider)} · ${artifactDetail.summary.sourceId}`}</strong></div>
+              <div className="task-meta"><span>Selection</span><strong>{selectionSummary(artifactDetail.summary.selectedPaths)}</strong></div>
+              <div className="task-meta"><span>Resolved revision</span><strong className="mono">{artifactDetail.summary.resolvedRevision}</strong></div>
+              <div className="task-meta"><span>Content</span><strong>{artifactDetail.summary.fileCount.toLocaleString()} files · {formatBytes(artifactDetail.summary.totalSize)}</strong></div>
+              <div className="task-meta"><span>Content SHA-256</span><strong className="mono">{artifactDetail.manifest.contentSha256}</strong></div>
+              <div className="task-meta"><span>Added to shelf</span><strong>{new Date(artifactDetail.summary.createdAt).toLocaleString()}</strong></div>
+              {artifactDetail.summary.selectionDigest && <div className="task-meta artifact-wide-meta"><span>Selection digest</span><strong className="mono">{artifactDetail.summary.selectionDigest}</strong></div>}
+              <div className="task-meta artifact-wide-meta"><span>Storage path</span><strong className="mono">{artifactDetail.summary.relativePath}</strong></div>
+            </div>
+            <ArtifactFileTree files={artifactDetail.manifest.files} />
+          </>}
+        </div>
+      </section>
+    </div>}
   </div>;
 }

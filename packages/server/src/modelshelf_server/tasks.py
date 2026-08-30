@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from modelshelf_core import (
     TASK_SCHEMA_VERSION,
+    ArtifactSummary,
     Catalog,
     DownloadTask,
     FileEntry,
@@ -79,6 +80,7 @@ class TaskStore:
         scheduled_at: datetime | None = None,
         queue_position: int | None = None,
         selected_paths: list[str] | None = None,
+        artifact_alias: str | None = None,
     ) -> DownloadTask:
         now = datetime.now(UTC)
         if scheduled_at is not None:
@@ -103,6 +105,7 @@ class TaskStore:
             scheduled_at=scheduled_at,
             queue_position=queue_position if initial_status is TaskStatus.QUEUED else None,
             selected_paths=selected_paths,
+            artifact_alias=artifact_alias,
             status=initial_status,
             progress=0,
             total_bytes=total_bytes,
@@ -125,6 +128,7 @@ class TaskStore:
         disable_proxy: bool,
         mirror_url: str | None = None,
         selected_paths: list[str] | None = None,
+        artifact_alias: str | None = None,
     ) -> DownloadTask:
         now = datetime.now(UTC)
         task = DownloadTask(
@@ -138,6 +142,7 @@ class TaskStore:
             mirror_url=mirror_url,
             disable_proxy=disable_proxy,
             selected_paths=selected_paths,
+            artifact_alias=artifact_alias,
             status=TaskStatus.COMPLETED,
             progress=100,
             bytes_downloaded=total_bytes,
@@ -502,6 +507,14 @@ class TaskManager:
         async with self._artifact_lock:
             return self.catalog.delete(artifact_id)
 
+    async def set_artifact_alias(
+        self, artifact_id: str, alias: str | None
+    ) -> ArtifactSummary:
+        async with self._create_lock:
+            self._ensure_alias_available(alias, allow_artifact_id=artifact_id)
+            async with self._artifact_lock:
+                return self.catalog.set_alias(artifact_id, alias)
+
     def find_duplicate(
         self,
         provider: Provider,
@@ -579,6 +592,7 @@ class TaskManager:
         disable_proxy: bool = False,
         scheduled_at: datetime | None = None,
         selected_paths: list[str] | None = None,
+        artifact_alias: str | None = None,
     ) -> TaskCreationResult:
         async with self._create_lock:
             duplicate = self.find_duplicate(
@@ -592,14 +606,34 @@ class TaskManager:
                 selected_paths=selected_paths,
             )
             if duplicate is not None:
-                if duplicate.task is not None:
-                    return TaskCreationResult(duplicate.task, duplicate.kind)
                 if (
                     duplicate.kind == "artifact"
                     and duplicate.artifact_id is not None
                     and duplicate.artifact_total_size is not None
                     and resolved_revision is not None
                 ):
+                    found = self.catalog.find(duplicate.artifact_id)
+                    if found is None:
+                        raise ValueError("the duplicate artifact disappeared during task creation")
+                    existing_alias = found[0].alias
+                    if artifact_alias is not None and existing_alias not in {None, artifact_alias}:
+                        raise ValueError(
+                            f"this artifact already has alias {existing_alias!r}"
+                        )
+                    if artifact_alias is not None and existing_alias is None:
+                        self._ensure_alias_available(
+                            artifact_alias, allow_artifact_id=duplicate.artifact_id
+                        )
+                        existing_alias = self.catalog.set_alias(
+                            duplicate.artifact_id, artifact_alias
+                        ).alias
+                    if duplicate.task is not None:
+                        completed = duplicate.task
+                        if completed.artifact_alias != existing_alias:
+                            completed = self.store.update(
+                                completed.id, {"artifact_alias": existing_alias}
+                            )
+                        return TaskCreationResult(completed, "artifact")
                     completed = self.store.create_completed(
                         provider,
                         source_id,
@@ -611,9 +645,27 @@ class TaskManager:
                         mirror_url=mirror_url,
                         disable_proxy=disable_proxy,
                         selected_paths=selected_paths,
+                        artifact_alias=existing_alias,
                     )
                     return TaskCreationResult(completed, "artifact")
+                if duplicate.task is not None:
+                    existing_task = duplicate.task
+                    if artifact_alias is None or artifact_alias == existing_task.artifact_alias:
+                        return TaskCreationResult(existing_task, duplicate.kind)
+                    if existing_task.artifact_alias is not None:
+                        raise ValueError(
+                            "this download task already reserves artifact alias "
+                            f"{existing_task.artifact_alias!r}"
+                        )
+                    self._ensure_alias_available(
+                        artifact_alias, exclude_task_id=existing_task.id
+                    )
+                    updated = self.store.update(
+                        existing_task.id, {"artifact_alias": artifact_alias}
+                    )
+                    return TaskCreationResult(updated, duplicate.kind)
 
+            self._ensure_alias_available(artifact_alias)
             task = self.store.create(
                 provider,
                 source_id,
@@ -626,6 +678,7 @@ class TaskManager:
                 scheduled_at=scheduled_at,
                 queue_position=self._claim_queue_position(),
                 selected_paths=selected_paths,
+                artifact_alias=artifact_alias,
             )
             if task.status is TaskStatus.SCHEDULED:
                 self._arm_scheduled_task(task)
@@ -647,6 +700,7 @@ class TaskManager:
         disable_proxy: bool = False,
         scheduled_at: datetime | None = None,
         selected_paths: list[str] | None = None,
+        artifact_alias: str | None = None,
     ) -> DownloadTask:
         return (
             await self.create_with_result(
@@ -660,8 +714,37 @@ class TaskManager:
                 disable_proxy=disable_proxy,
                 scheduled_at=scheduled_at,
                 selected_paths=selected_paths,
+                artifact_alias=artifact_alias,
             )
         ).task
+
+    def _ensure_alias_available(
+        self,
+        alias: str | None,
+        *,
+        exclude_task_id: str | None = None,
+        allow_artifact_id: str | None = None,
+    ) -> None:
+        if alias is None:
+            return
+        owner = self.catalog.alias_owner(alias)
+        if owner is not None and owner != allow_artifact_id:
+            raise ValueError(f"artifact alias {alias!r} is already in use")
+        reserving = next(
+            (
+                task
+                for task in self.store.list()
+                if task.id != exclude_task_id
+                and task.artifact_alias == alias
+                and task.status
+                not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+            ),
+            None,
+        )
+        if reserving is not None:
+            raise ValueError(
+                f"artifact alias {alias!r} is reserved by task {reserving.id}"
+            )
 
     def reorder_queued(self, ordered_task_ids: list[str]) -> list[DownloadTask]:
         if len(ordered_task_ids) != len(set(ordered_task_ids)):
@@ -1245,6 +1328,8 @@ class TaskManager:
             self._raise_if_stopped(task_id)
             async with self._artifact_lock:
                 self.catalog.publish(download_root, manifest)
+                if task.artifact_alias is not None:
+                    self.catalog.set_alias(manifest.artifact_id, task.artifact_alias)
             shutil.rmtree(stage, ignore_errors=True)
             await self._update(
                 task_id,
@@ -1391,6 +1476,8 @@ class TaskManager:
         await self._update(task_id, status=TaskStatus.PUBLISHING, progress=99)
         async with self._artifact_lock:
             self.catalog.publish(publish_root, manifest)
+            if task.artifact_alias is not None:
+                self.catalog.set_alias(manifest.artifact_id, task.artifact_alias)
         shutil.rmtree(stage, ignore_errors=True)
         return await self._update(
             task_id,

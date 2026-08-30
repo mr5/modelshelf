@@ -28,6 +28,31 @@ from modelshelf_server.providers import (
 from modelshelf_server.tasks import TaskStore
 
 
+def test_manual_file_selection_is_allowed_outside_recognized_gguf_variants() -> None:
+    estimate = DownloadEstimate(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        "a" * 40,
+        160,
+        3,
+        files=(
+            SourceFile("config.json", 10),
+            SourceFile("weights/model-00001.safetensors", 100),
+            SourceFile("weights/model-00002.safetensors", 50),
+        ),
+    )
+
+    selected, total, count = app_module._selected_estimate(
+        estimate,
+        ["weights/model-00002.safetensors", "config.json"],
+    )
+
+    assert selected == ["config.json", "weights/model-00002.safetensors"]
+    assert total == 60
+    assert count == 2
+
+
 def test_queued_and_paused_tasks_can_be_reordered_through_the_api(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,6 +241,31 @@ def test_delete_endpoints_require_write_access_and_remove_owned_data(tmp_path: P
     with TestClient(create_app(settings)) as client:
         assert client.delete(f"/api/v1/tasks/{failed.id}").status_code == 401
         assert client.delete(f"/api/v1/artifacts/{manifest.artifact_id}").status_code == 401
+        assert (
+            client.put(
+                f"/api/v1/artifacts/{manifest.artifact_id}/alias",
+                json={"alias": "small"},
+            ).status_code
+            == 401
+        )
+        aliased = client.put(
+            f"/api/v1/artifacts/{manifest.artifact_id}/alias",
+            json={"alias": "small"},
+            headers=headers,
+        )
+        assert aliased.status_code == 200
+        assert aliased.json()["alias"] == "small"
+        detail = client.get(f"/api/v1/artifacts/{manifest.artifact_id}").json()
+        assert detail["summary"]["alias"] == "small"
+        assert client.get("/api/v1/artifacts", params={"q": "small"}).json()[0]["alias"] == "small"
+        assert (
+            client.put(
+                f"/api/v1/artifacts/{manifest.artifact_id}/alias",
+                json={"alias": "unsafe/path"},
+                headers=headers,
+            ).status_code
+            == 422
+        )
         active_delete = client.delete(f"/api/v1/tasks/{paused.id}", headers=headers)
         assert active_delete.status_code == 409
         assert "only completed, failed or cancelled" in active_delete.json()["detail"]
@@ -519,6 +569,7 @@ def test_provider_search_and_revision_discovery_are_authenticated_and_cached(
             assert estimate.json()["totalSize"] == 2_120
             assert estimate.json()["hubUrl"] == "https://hub.example/owner/model"
             assert estimate.json()["metadata"] == [{"label": "Library", "value": "transformers"}]
+            assert estimate.json()["fileSelectionAvailable"] is True
             assert estimate.json()["ggufVariantSelectionAvailable"] is True
             assert estimate.json()["ggufVariants"] == [
                 {
@@ -698,13 +749,21 @@ def test_estimate_reports_an_existing_immutable_artifact(
 
         created = client.post(
             "/api/v1/tasks",
-            json={"provider": "huggingface", "id": "owner/model", "revision": "main"},
+            json={
+                "provider": "huggingface",
+                "id": "owner/model",
+                "revision": "main",
+                "alias": "production-model",
+            },
             headers=headers,
         )
         assert created.status_code == 202
         assert created.json()["status"] == "completed"
         assert created.json()["deduplicated"] is True
         assert created.json()["deduplicationReason"] == "artifact"
+        assert created.json()["artifactAlias"] == "production-model"
+        detail = client.get(f"/api/v1/artifacts/{manifest.artifact_id}").json()
+        assert detail["summary"]["alias"] == "production-model"
 
         repeated_estimate = client.get(
             "/api/v1/providers/huggingface/estimate",

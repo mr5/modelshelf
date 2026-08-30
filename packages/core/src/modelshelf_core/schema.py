@@ -5,9 +5,11 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .models import (
+    ARTIFACT_ALIASES_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION,
     STORAGE_LAYOUT_SCHEMA_VERSION,
     TASK_SCHEMA_VERSION,
+    ArtifactAliases,
     ArtifactManifest,
     DownloadTask,
     StorageLayout,
@@ -113,6 +115,12 @@ def _task_v4_to_v5(document: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _task_v5_to_v6(document: dict[str, Any]) -> dict[str, Any]:
+    result = dict(document)
+    result.setdefault("artifactAlias", None)
+    return result
+
+
 def _manifest_v1_to_v2(document: dict[str, Any]) -> dict[str, Any]:
     result = dict(document)
     source = dict(result.get("source") or {})
@@ -132,6 +140,7 @@ def load_task_json(raw: str) -> tuple[DownloadTask, bool]:
             2: _task_v2_to_v3,
             3: _task_v3_to_v4,
             4: _task_v4_to_v5,
+            5: _task_v5_to_v6,
         },
         missing_version=0,
     )
@@ -157,3 +166,13 @@ def migrate_storage_layout_json(raw: str) -> tuple[StorageLayout, bool]:
 def load_storage_layout_json(raw: str) -> StorageLayout:
     layout, _migrated = migrate_storage_layout_json(raw)
     return layout
+
+
+def load_artifact_aliases_json(raw: str) -> ArtifactAliases:
+    document, _migrated = _migrate_document(
+        _json_object(raw, "artifact aliases"),
+        document_name="artifact aliases",
+        current_version=ARTIFACT_ALIASES_SCHEMA_VERSION,
+        migrations={},
+    )
+    return ArtifactAliases.model_validate(document)

@@ -190,7 +190,7 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     loaded = manager.store.get(task_id)
     assert loaded is not None
     assert loaded.mirror_url is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 5
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 6
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 1
@@ -200,7 +200,7 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     assert migrated is not None
     assert migrated.mirror_url is None
     assert migrated.scheduled_at is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 5
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 6
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 4
@@ -211,10 +211,11 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     assert migrated is not None
     assert migrated.verification_bytes_completed == 0
     assert migrated.verification_detail is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 5
+    assert migrated.artifact_alias is None
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 6
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
-    document["schemaVersion"] = 6
+    document["schemaVersion"] = 7
     task_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
         manager.store.list()
@@ -365,6 +366,7 @@ def test_create_reuses_existing_artifact_without_downloading(tmp_path: Path) -> 
             "owner/model",
             "main",
             resolved_revision=resolved,
+            artifact_alias="production-model",
         )
         first = first_result.task
         second = await manager.create(
@@ -375,6 +377,9 @@ def test_create_reuses_existing_artifact_without_downloading(tmp_path: Path) -> 
         )
         assert first.status.value == "completed"
         assert first.artifact_id == manifest.artifact_id
+        assert first.artifact_alias == "production-model"
+        found = catalog.find(manifest.artifact_id)
+        assert found is not None and found[0].alias == "production-model"
         assert first.bytes_downloaded == manifest.total_size
         assert first_result.deduplication_reason == "artifact"
         assert second.id == first.id
@@ -394,6 +399,74 @@ def test_create_does_not_deduplicate_without_resolved_revision(tmp_path: Path) -
         assert second.id != first.id
         assert len(manager.store.list()) == 2
         assert manager.queue.qsize() == 2
+
+    asyncio.run(exercise())
+
+
+def test_task_creation_reserves_artifact_alias_until_terminal_state(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        first = await manager.create(
+            Provider.HUGGINGFACE,
+            "owner/first",
+            "main",
+            resolved_revision="a" * 40,
+            artifact_alias="shared-alias",
+        )
+        with pytest.raises(ValueError, match="reserved by task"):
+            await manager.create(
+                Provider.HUGGINGFACE,
+                "owner/second",
+                "main",
+                resolved_revision="b" * 40,
+                artifact_alias="shared-alias",
+            )
+
+        await manager.cancel(first.id)
+        second = await manager.create(
+            Provider.HUGGINGFACE,
+            "owner/second",
+            "main",
+            resolved_revision="b" * 40,
+            artifact_alias="shared-alias",
+        )
+        assert second.artifact_alias == "shared-alias"
+
+    asyncio.run(exercise())
+
+
+def test_duplicate_task_can_reserve_one_alias_but_not_two(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        first = await manager.create(
+            Provider.HUGGINGFACE,
+            "owner/model",
+            "main",
+            resolved_revision="a" * 40,
+        )
+        aliased = await manager.create_with_result(
+            Provider.HUGGINGFACE,
+            "owner/model",
+            "main",
+            resolved_revision="a" * 40,
+            artifact_alias="first-alias",
+        )
+        assert aliased.task.id == first.id
+        assert aliased.task.artifact_alias == "first-alias"
+        with pytest.raises(ValueError, match="already reserves"):
+            await manager.create(
+                Provider.HUGGINGFACE,
+                "owner/model",
+                "main",
+                resolved_revision="a" * 40,
+                artifact_alias="second-alias",
+            )
 
     asyncio.run(exercise())
 
@@ -465,6 +538,7 @@ def test_scheduled_task_does_not_enter_queue_until_its_start_time(
                 "main",
                 resolved_revision=resolved,
                 scheduled_at=datetime.now(UTC) + timedelta(milliseconds=200),
+                artifact_alias="scheduled-model",
             )
             assert task.status is TaskStatus.SCHEDULED
             assert manager.queue.qsize() == 0
@@ -479,6 +553,10 @@ def test_scheduled_task_does_not_enter_queue_until_its_start_time(
                     break
                 await asyncio.sleep(0.02)
             assert manager.store.get(task.id).status is TaskStatus.COMPLETED  # type: ignore[union-attr]
+            completed = manager.store.get(task.id)
+            assert completed is not None and completed.artifact_id is not None
+            artifact = catalog.find(completed.artifact_id)
+            assert artifact is not None and artifact[0].alias == "scheduled-model"
             assert calls == 1
         finally:
             await manager.stop()

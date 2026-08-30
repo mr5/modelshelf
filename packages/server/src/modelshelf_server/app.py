@@ -29,7 +29,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from modelshelf_core import Catalog, Provider
+from modelshelf_core import Catalog, Provider, validate_artifact_alias
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from . import __version__
@@ -59,6 +59,15 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ArtifactAliasRequest(BaseModel):
+    alias: str | None = Field(default=None, max_length=128)
+
+    @field_validator("alias")
+    @classmethod
+    def validate_alias(cls, value: str | None) -> str | None:
+        return validate_artifact_alias(value) if value is not None else None
+
+
 class CreateTaskRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -70,6 +79,12 @@ class CreateTaskRequest(BaseModel):
     disable_proxy: bool = Field(default=False, alias="disableProxy")
     scheduled_at: datetime | None = Field(default=None, alias="scheduledAt")
     selected_paths: list[str] | None = Field(default=None, alias="selectedPaths")
+    artifact_alias: str | None = Field(default=None, alias="alias", max_length=128)
+
+    @field_validator("artifact_alias")
+    @classmethod
+    def validate_artifact_alias_request(cls, value: str | None) -> str | None:
+        return validate_artifact_alias(value) if value is not None else None
 
     @field_validator("mirror_url", mode="before")
     @classmethod
@@ -154,10 +169,10 @@ def _selected_estimate(
         )
     normalized = sorted(set(selected_paths))
     variants = discover_gguf_variants(estimate.files)
-    if not any(sorted(variant.paths) == normalized for variant in variants):
+    if variants and not any(sorted(variant.paths) == normalized for variant in variants):
         raise ValueError(
             "selected files must exactly match one complete, recognized GGUF variant; "
-            "download the full repository when variant selection is unavailable"
+            "all shards in that variant are required"
         )
     if len(normalized) == len(available):
         return None, estimate.total_size, estimate.file_count
@@ -612,6 +627,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "manifest": manifest.model_dump(mode="json", by_alias=True, exclude_none=True),
         }
 
+    @app.put(
+        "/api/v1/artifacts/{artifact_id}/alias",
+        dependencies=[Depends(require_write)],
+    )
+    async def set_artifact_alias(
+        artifact_id: str, request: ArtifactAliasRequest
+    ) -> dict[str, Any]:
+        try:
+            summary = await manager.set_artifact_alias(artifact_id, request.alias)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "artifact not found") from None
+        except ValueError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        return summary.model_dump(mode="json", by_alias=True)
+
     @app.delete(
         "/api/v1/artifacts/{artifact_id}",
         status_code=status.HTTP_204_NO_CONTENT,
@@ -865,18 +895,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except ValueError as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
-        creation = await manager.create_with_result(
-            estimate.provider,
-            estimate.source_id,
-            estimate.requested_revision,
-            resolved_revision=estimate.resolved_revision,
-            total_bytes=total_bytes,
-            disable_mirror=body.disable_mirror,
-            mirror_url=body.mirror_url,
-            disable_proxy=body.disable_proxy,
-            scheduled_at=body.scheduled_at,
-            selected_paths=selected_paths,
-        )
+        try:
+            creation = await manager.create_with_result(
+                estimate.provider,
+                estimate.source_id,
+                estimate.requested_revision,
+                resolved_revision=estimate.resolved_revision,
+                total_bytes=total_bytes,
+                disable_mirror=body.disable_mirror,
+                mirror_url=body.mirror_url,
+                disable_proxy=body.disable_proxy,
+                scheduled_at=body.scheduled_at,
+                selected_paths=selected_paths,
+                artifact_alias=body.artifact_alias,
+            )
+        except ValueError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
         item = creation.task
         result = item.model_dump(mode="json", by_alias=True, exclude_none=True)
         result["deduplicated"] = creation.deduplication_reason is not None

@@ -9,8 +9,9 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MANIFEST_SCHEMA_VERSION: Literal[2] = 2
-TASK_SCHEMA_VERSION: Literal[5] = 5
+TASK_SCHEMA_VERSION: Literal[6] = 6
 STORAGE_LAYOUT_SCHEMA_VERSION: Literal[2] = 2
+ARTIFACT_ALIASES_SCHEMA_VERSION: Literal[1] = 1
 
 
 def to_camel(value: str) -> str:
@@ -20,6 +21,19 @@ def to_camel(value: str) -> str:
 
 class Model(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+
+
+def validate_artifact_alias(value: str) -> str:
+    alias = value.strip()
+    if alias != value or not alias:
+        raise ValueError("artifact alias must not be empty or contain surrounding whitespace")
+    if len(alias) > 128:
+        raise ValueError("artifact alias must be at most 128 characters")
+    if alias in {".", "..", ".modelshelf", ".staging"}:
+        raise ValueError(f"artifact alias {alias!r} is reserved")
+    if any(character in alias for character in ("/", "\\", "\r", "\n", "\t")):
+        raise ValueError("artifact alias must not contain path separators or control whitespace")
+    return alias
 
 
 class Provider(StrEnum):
@@ -108,6 +122,20 @@ class StorageLayout(Model):
     kind: Literal["modelshelf-storage"] = "modelshelf-storage"
 
 
+class ArtifactAliases(Model):
+    schema_version: Literal[1]
+    artifacts: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def aliases_are_valid_and_unique(self) -> ArtifactAliases:
+        if any(not artifact_id for artifact_id in self.artifacts):
+            raise ValueError("artifact alias entries must have an artifact ID")
+        aliases = [validate_artifact_alias(alias) for alias in self.artifacts.values()]
+        if len(set(aliases)) != len(aliases):
+            raise ValueError("artifact aliases must be unique")
+        return self
+
+
 class ArtifactSummary(Model):
     artifact_id: str
     name: str
@@ -120,6 +148,7 @@ class ArtifactSummary(Model):
     file_count: int
     created_at: datetime
     relative_path: str
+    alias: str | None = None
     selection_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     selected_paths: list[str] | None = None
 
@@ -139,7 +168,7 @@ class InferredMetadata(Model):
 
 
 class DownloadTask(Model):
-    schema_version: Literal[5]
+    schema_version: Literal[6]
     id: str
     provider: Provider
     source_id: str
@@ -151,6 +180,7 @@ class DownloadTask(Model):
     queue_position: int | None = Field(default=None, ge=0)
     resume_from_stage: bool = False
     selected_paths: list[str] | None = None
+    artifact_alias: str | None = None
     resolved_revision: str | None = None
     status: TaskStatus
     progress: int = Field(ge=0, le=100)
@@ -205,6 +235,11 @@ class DownloadTask(Model):
         for path in normalized:
             FileEntry.relative_safe_path(path)
         return normalized
+
+    @field_validator("artifact_alias")
+    @classmethod
+    def valid_artifact_alias(cls, value: str | None) -> str | None:
+        return validate_artifact_alias(value) if value is not None else None
 
     @model_validator(mode="after")
     def valid_mirror_route(self) -> DownloadTask:

@@ -1,1 +1,17 @@
-__version__ = "0.1.0-beta.16"
+from __future__ import annotations
+
+import re
+from importlib.metadata import PackageNotFoundError, version
+
+
+def _display_version(distribution_version: str) -> str:
+    beta = re.fullmatch(r"(\d+\.\d+\.\d+)b(\d+)", distribution_version)
+    if beta is not None:
+        return f"{beta.group(1)}-beta.{beta.group(2)}"
+    return distribution_version
+
+
+try:
+    __version__ = _display_version(version("modelshelf-server"))
+except PackageNotFoundError:
+    __version__ = "dev"

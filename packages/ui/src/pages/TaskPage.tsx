@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, formatBytes, formatDuration, formatRate } from "../api.ts";
-import { ArtifactFileTree } from "../components/ArtifactFileTree.tsx";
+import { FileTree } from "../components/FileTree.tsx";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
 import { ResumeControl } from "../components/ResumeControl.tsx";
 import { ScheduleControl } from "../components/ScheduleControl.tsx";
@@ -221,7 +221,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       <Detail label="Network route" value={route} />
     </section>
 
-    {task.selectedPaths && <ArtifactFileTree title="Selected source files" files={task.selectedPaths.map((path) => ({ path }))} />}
+    {task.selectedPaths && <FileTree title="Selected source files" files={task.selectedPaths.map((path) => ({ path }))} />}
 
     {task.error && <div className="error-box">{task.error}</div>}
     {error && <div className="error-box">{error}</div>}

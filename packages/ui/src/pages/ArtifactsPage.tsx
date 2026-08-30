@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { siGithub, siHuggingface, siKaggle, siModelscope } from "simple-icons";
 import { api, formatBytes } from "../api.ts";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
-import { ArtifactFileTree } from "../components/ArtifactFileTree.tsx";
+import { FileTree } from "../components/FileTree.tsx";
 import { selectionSummary } from "../selection.ts";
 import { sourceModelUrl } from "../source.ts";
 import type { ArtifactDetail, ArtifactSummary, Page, Provider } from "../types.ts";
@@ -306,7 +306,7 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
               {artifactDetail.summary.selectionDigest && <div className="task-meta artifact-wide-meta"><span>Selection digest</span><strong className="mono">{artifactDetail.summary.selectionDigest}</strong></div>}
               <div className="task-meta artifact-wide-meta"><span>Storage path</span><strong className="mono">{artifactDetail.summary.relativePath}</strong></div>
             </div>
-            <ArtifactFileTree files={artifactDetail.manifest.files} />
+            <FileTree files={artifactDetail.manifest.files} />
           </>}
         </div>
       </section>

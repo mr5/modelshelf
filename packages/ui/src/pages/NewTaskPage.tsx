@@ -1,6 +1,7 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, formatBytes } from "../api.ts";
+import { SelectableFileTree } from "../components/FileTree.tsx";
 import { selectionSummary } from "../selection.ts";
 import type {
   DownloadEstimate,
@@ -23,99 +24,7 @@ const providers: { value: Provider; label: string; hint: string }[] = [
 ];
 
 type LookupState = "idle" | "loading" | "ready" | "error";
-type SelectableFile = { path: string; size?: number };
-type FileTreeNode = {
-  name: string;
-  path: string;
-  kind: "directory" | "file";
-  children: FileTreeNode[];
-  filePaths: string[];
-  totalSize?: number;
-};
 const lookupTimeoutMs = 35_000;
-
-function buildFileTree(files: SelectableFile[]): FileTreeNode[] {
-  type MutableNode = { name: string; path: string; children: Map<string, MutableNode>; file?: SelectableFile };
-  const root = new Map<string, MutableNode>();
-  for (const file of files) {
-    const parts = file.path.split("/").filter(Boolean);
-    let children = root;
-    let path = "";
-    for (const [index, name] of parts.entries()) {
-      path = path ? `${path}/${name}` : name;
-      let node = children.get(name);
-      if (!node) {
-        node = { name, path, children: new Map() };
-        children.set(name, node);
-      }
-      if (index === parts.length - 1) node.file = file;
-      children = node.children;
-    }
-  }
-
-  function finalize(nodes: Map<string, MutableNode>): FileTreeNode[] {
-    return [...nodes.values()].map((node) => {
-      const children = finalize(node.children);
-      const ownFiles = node.file ? [node.file] : [];
-      const filePaths = [...ownFiles.map((file) => file.path), ...children.flatMap((child) => child.filePaths)];
-      const sizes = [...ownFiles.map((file) => file.size), ...children.map((child) => child.totalSize)];
-      const result: FileTreeNode = {
-        name: node.name,
-        path: node.path,
-        kind: children.length > 0 ? "directory" : "file",
-        children,
-        filePaths,
-        totalSize: sizes.every((size) => size !== undefined)
-          ? sizes.reduce<number>((total, size) => total + (size ?? 0), 0)
-          : undefined,
-      };
-      return result;
-    }).sort((left, right) => {
-      if (left.kind !== right.kind) return left.kind === "directory" ? -1 : 1;
-      return left.name.localeCompare(right.name);
-    });
-  }
-
-  return finalize(root);
-}
-
-function filterFileTree(nodes: FileTreeNode[], query: string): FileTreeNode[] {
-  if (!query) return nodes;
-  return nodes.flatMap((node) => {
-    const children = filterFileTree(node.children, query);
-    return node.path.toLocaleLowerCase().includes(query) || children.length > 0
-      ? [{ ...node, children }]
-      : [];
-  });
-}
-
-function FileTreeRows({ nodes, selected, expanded, searching, onToggle, onExpand }: {
-  nodes: FileTreeNode[];
-  selected: Set<string>;
-  expanded: Set<string>;
-  searching: boolean;
-  onToggle: (paths: string[], checked: boolean) => void;
-  onExpand: (path: string) => void;
-}) {
-  return <>{nodes.map((node) => {
-    const selectedCount = node.filePaths.filter((path) => selected.has(path)).length;
-    const checked = selectedCount === node.filePaths.length;
-    const partiallyChecked = selectedCount > 0 && !checked;
-    const isExpanded = node.kind === "directory" && (searching || expanded.has(node.path));
-    return <div className="file-tree-node" key={node.path}>
-      <div className="file-tree-row">
-        {node.kind === "directory"
-          ? <button type="button" className="file-tree-toggle" aria-label={`${isExpanded ? "Collapse" : "Expand"} ${node.path}`} aria-expanded={isExpanded} onClick={() => onExpand(node.path)}>{isExpanded ? "−" : "+"}</button>
-          : <span className="file-tree-toggle" aria-hidden="true" />}
-        <label className="file-tree-label">
-          <input type="checkbox" checked={checked} ref={(element) => { if (element) element.indeterminate = partiallyChecked; }} onChange={(event) => onToggle(node.filePaths, event.target.checked)} />
-          <span><code title={node.path}>{node.name}{node.kind === "directory" ? "/" : ""}</code><small>{node.kind === "directory" ? `${node.filePaths.length.toLocaleString()} files` : "file"}{node.totalSize === undefined ? " · size unavailable" : ` · ${formatBytes(node.totalSize)}`}</small></span>
-        </label>
-      </div>
-      {isExpanded && node.children.length > 0 && <div className="file-tree-children"><FileTreeRows nodes={node.children} selected={selected} expanded={expanded} searching={searching} onToggle={onToggle} onExpand={onExpand} /></div>}
-    </div>;
-  })}</>;
-}
 
 function defaultRevision(provider: Provider): string {
   if (provider === "modelscope-cn" || provider === "modelscope-ai") return "master";
@@ -391,11 +300,6 @@ export function NewTaskPage() {
   const visibleVariants = normalizedFilter
     ? availableVariants.filter((variant) => variant.label.toLocaleLowerCase().includes(normalizedFilter))
     : availableVariants;
-  const fileTree = useMemo(() => buildFileTree(selectableFiles), [selectableFiles]);
-  const visibleFileTree = useMemo(
-    () => filterFileTree(fileTree, normalizedFilter),
-    [fileTree, normalizedFilter],
-  );
   const selectedVariant = availableVariants.find((variant) =>
     variant.paths.length === selectedPaths.length
     && variant.paths.every((path, index) => path === selectedPaths[index])
@@ -639,8 +543,8 @@ export function NewTaskPage() {
                     <span><code title={variant.paths.join("\n")}>{variant.label}</code><small>{variant.fileCount > 1 ? `${variant.fileCount} shards · ` : ""}{variant.totalSize === undefined ? "size unavailable" : formatBytes(variant.totalSize)}</small></span>
                   </label>;
                 })}
-                {!usesGgufVariants && <FileTreeRows nodes={visibleFileTree} selected={selectedPathSet} expanded={expandedPaths} searching={normalizedFilter.length > 0} onToggle={toggleSelectedPaths} onExpand={toggleExpandedPath} />}
-                {(usesGgufVariants ? visibleVariants.length === 0 : visibleFileTree.length === 0) && <p className="muted">No {usesGgufVariants ? "variants" : "files"} match this filter.</p>}
+                {!usesGgufVariants && <SelectableFileTree files={selectableFiles} query={variantFilter} selected={selectedPathSet} expanded={expandedPaths} onSelectionChange={toggleSelectedPaths} onExpand={toggleExpandedPath} />}
+                {usesGgufVariants && visibleVariants.length === 0 && <p className="muted">No variants match this filter.</p>}
               </div>
               <div className={`file-selection-status ${validSelection ? "" : "invalid"}`}>{validSelection ? <><strong>{selectionSummary(selectedPaths)}</strong><span>{displayFileCount?.toLocaleString()} {displayFileCount === 1 ? "file" : "files"} selected{displaySize === undefined ? "" : ` · ${formatBytes(displaySize)}`}</span></> : usesGgufVariants ? "Select one GGUF variant." : "Select at least one file."}</div>
               {usesGgufVariants && estimate.ggufAuxiliaryFiles && estimate.ggufAuxiliaryFiles.length > 0 && <div className="file-selection-note">

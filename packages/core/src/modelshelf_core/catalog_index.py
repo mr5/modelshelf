@@ -11,7 +11,7 @@ from pathlib import Path
 from .identity import artifact_relative_path
 from .models import ArtifactSummary, Provider
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class CatalogIndexVersionError(RuntimeError):
@@ -69,6 +69,7 @@ class CatalogIndex:
                 CREATE TABLE IF NOT EXISTS artifacts (
                     artifact_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
+                    alias TEXT,
                     version TEXT NOT NULL,
                     provider TEXT NOT NULL,
                     source_id TEXT NOT NULL,
@@ -126,6 +127,7 @@ class CatalogIndex:
         return (
             summary.artifact_id,
             summary.name,
+            summary.alias,
             summary.version,
             summary.provider.value,
             summary.source_id,
@@ -138,7 +140,10 @@ class CatalogIndex:
             summary.total_size,
             summary.file_count,
             summary.created_at.isoformat(),
-            f"{summary.name} {summary.source_id} {summary.version}".casefold(),
+            (
+                f"{summary.alias or ''} {summary.name} "
+                f"{summary.source_id} {summary.version}"
+            ).casefold(),
             manifest_mtime_ns,
             manifest_size,
         )
@@ -147,13 +152,14 @@ class CatalogIndex:
     def _upsert_sql() -> str:
         return """
             INSERT INTO artifacts (
-                artifact_id, name, version, provider, source_id, requested_revision,
+                artifact_id, name, alias, version, provider, source_id, requested_revision,
                 resolved_revision, selection_digest, selected_paths_json,
                 total_size, file_count, created_at,
                 search_text, manifest_mtime_ns, manifest_size
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(artifact_id) DO UPDATE SET
                 name = excluded.name,
+                alias = excluded.alias,
                 version = excluded.version,
                 provider = excluded.provider,
                 source_id = excluded.source_id,
@@ -181,15 +187,16 @@ class CatalogIndex:
         with closing(self._connect()) as connection, connection:
             connection.execute("DELETE FROM artifacts WHERE artifact_id = ?", (artifact_id,))
 
-    def manifest_metadata(self) -> dict[str, tuple[int, int]]:
+    def manifest_metadata(self) -> dict[str, tuple[int, int, str | None]]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT artifact_id, manifest_mtime_ns, manifest_size FROM artifacts"
+                "SELECT artifact_id, manifest_mtime_ns, manifest_size, alias FROM artifacts"
             )
             return {
                 str(row["artifact_id"]): (
                     int(row["manifest_mtime_ns"]),
                     int(row["manifest_size"]),
+                    str(row["alias"]) if row["alias"] is not None else None,
                 )
                 for row in rows
             }
@@ -220,6 +227,7 @@ class CatalogIndex:
             {
                 "artifactId": row["artifact_id"],
                 "name": row["name"],
+                "alias": row["alias"],
                 "version": row["version"],
                 "provider": row["provider"],
                 "sourceId": row["source_id"],
@@ -253,7 +261,7 @@ class CatalogIndex:
     ) -> list[ArtifactSummary]:
         sort_columns = {
             "created": "created_at",
-            "name": "name COLLATE NOCASE",
+            "name": "COALESCE(alias, name) COLLATE NOCASE",
             "size": "total_size",
         }
         if sort_by not in sort_columns:

@@ -13,6 +13,7 @@ from .models import (
     SourceReference,
     StorageLayout,
     TaskStatus,
+    validate_artifact_alias,
 )
 from .schema import FutureSchemaVersionError, SchemaVersionError
 
@@ -34,4 +35,5 @@ __all__ = [
     "TASK_SCHEMA_VERSION",
     "TaskStatus",
     "VerificationError",
+    "validate_artifact_alias",
 ]

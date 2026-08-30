@@ -43,8 +43,16 @@ async def _main(payload: dict[str, Any]) -> None:
             **common,
         )
         estimate_record = estimate.as_dict()
-        # The parent process needs the complete immutable file inventory to classify safe GGUF
-        # variants. This internal worker record is not returned directly by the HTTP API.
+        # The parent process needs the complete immutable file inventory for selection validation
+        # and safe GGUF variant classification. This worker record is not returned directly.
+        for key in (
+            "fileSelectionAvailable",
+            "selectableFiles",
+            "ggufVariantSelectionAvailable",
+            "ggufVariants",
+            "ggufAuxiliaryFiles",
+        ):
+            estimate_record.pop(key, None)
         estimate_record["files"] = [file.as_dict() for file in estimate.files]
         _emit({"type": "result", "estimate": estimate_record})
         return

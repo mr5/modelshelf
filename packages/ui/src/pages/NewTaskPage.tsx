@@ -1,6 +1,7 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, formatBytes } from "../api.ts";
+import { selectionSummary } from "../selection.ts";
 import type {
   DownloadEstimate,
   DownloadTask,
@@ -22,7 +23,99 @@ const providers: { value: Provider; label: string; hint: string }[] = [
 ];
 
 type LookupState = "idle" | "loading" | "ready" | "error";
+type SelectableFile = { path: string; size?: number };
+type FileTreeNode = {
+  name: string;
+  path: string;
+  kind: "directory" | "file";
+  children: FileTreeNode[];
+  filePaths: string[];
+  totalSize?: number;
+};
 const lookupTimeoutMs = 35_000;
+
+function buildFileTree(files: SelectableFile[]): FileTreeNode[] {
+  type MutableNode = { name: string; path: string; children: Map<string, MutableNode>; file?: SelectableFile };
+  const root = new Map<string, MutableNode>();
+  for (const file of files) {
+    const parts = file.path.split("/").filter(Boolean);
+    let children = root;
+    let path = "";
+    for (const [index, name] of parts.entries()) {
+      path = path ? `${path}/${name}` : name;
+      let node = children.get(name);
+      if (!node) {
+        node = { name, path, children: new Map() };
+        children.set(name, node);
+      }
+      if (index === parts.length - 1) node.file = file;
+      children = node.children;
+    }
+  }
+
+  function finalize(nodes: Map<string, MutableNode>): FileTreeNode[] {
+    return [...nodes.values()].map((node) => {
+      const children = finalize(node.children);
+      const ownFiles = node.file ? [node.file] : [];
+      const filePaths = [...ownFiles.map((file) => file.path), ...children.flatMap((child) => child.filePaths)];
+      const sizes = [...ownFiles.map((file) => file.size), ...children.map((child) => child.totalSize)];
+      const result: FileTreeNode = {
+        name: node.name,
+        path: node.path,
+        kind: children.length > 0 ? "directory" : "file",
+        children,
+        filePaths,
+        totalSize: sizes.every((size) => size !== undefined)
+          ? sizes.reduce<number>((total, size) => total + (size ?? 0), 0)
+          : undefined,
+      };
+      return result;
+    }).sort((left, right) => {
+      if (left.kind !== right.kind) return left.kind === "directory" ? -1 : 1;
+      return left.name.localeCompare(right.name);
+    });
+  }
+
+  return finalize(root);
+}
+
+function filterFileTree(nodes: FileTreeNode[], query: string): FileTreeNode[] {
+  if (!query) return nodes;
+  return nodes.flatMap((node) => {
+    const children = filterFileTree(node.children, query);
+    return node.path.toLocaleLowerCase().includes(query) || children.length > 0
+      ? [{ ...node, children }]
+      : [];
+  });
+}
+
+function FileTreeRows({ nodes, selected, expanded, searching, onToggle, onExpand }: {
+  nodes: FileTreeNode[];
+  selected: Set<string>;
+  expanded: Set<string>;
+  searching: boolean;
+  onToggle: (paths: string[], checked: boolean) => void;
+  onExpand: (path: string) => void;
+}) {
+  return <>{nodes.map((node) => {
+    const selectedCount = node.filePaths.filter((path) => selected.has(path)).length;
+    const checked = selectedCount === node.filePaths.length;
+    const partiallyChecked = selectedCount > 0 && !checked;
+    const isExpanded = node.kind === "directory" && (searching || expanded.has(node.path));
+    return <div className="file-tree-node" key={node.path}>
+      <div className="file-tree-row">
+        {node.kind === "directory"
+          ? <button type="button" className="file-tree-toggle" aria-label={`${isExpanded ? "Collapse" : "Expand"} ${node.path}`} aria-expanded={isExpanded} onClick={() => onExpand(node.path)}>{isExpanded ? "−" : "+"}</button>
+          : <span className="file-tree-toggle" aria-hidden="true" />}
+        <label className="file-tree-label">
+          <input type="checkbox" checked={checked} ref={(element) => { if (element) element.indeterminate = partiallyChecked; }} onChange={(event) => onToggle(node.filePaths, event.target.checked)} />
+          <span><code title={node.path}>{node.name}{node.kind === "directory" ? "/" : ""}</code><small>{node.kind === "directory" ? `${node.filePaths.length.toLocaleString()} files` : "file"}{node.totalSize === undefined ? " · size unavailable" : ` · ${formatBytes(node.totalSize)}`}</small></span>
+        </label>
+      </div>
+      {isExpanded && node.children.length > 0 && <div className="file-tree-children"><FileTreeRows nodes={node.children} selected={selected} expanded={expanded} searching={searching} onToggle={onToggle} onExpand={onExpand} /></div>}
+    </div>;
+  })}</>;
+}
 
 function defaultRevision(provider: Provider): string {
   if (provider === "modelscope-cn" || provider === "modelscope-ai") return "master";
@@ -84,7 +177,9 @@ export function NewTaskPage() {
   const [scheduledAt, setScheduledAt] = useState("");
   const [selectFiles, setSelectFiles] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [artifactAlias, setArtifactAlias] = useState("");
   const [variantFilter, setVariantFilter] = useState("");
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [revisionOptions, setRevisionOptions] = useState<RevisionOption[]>([]);
   const [modelLookup, setModelLookup] = useState<LookupState>("idle");
@@ -208,6 +303,7 @@ export function NewTaskPage() {
     setSelectFiles(false);
     setVariantFilter("");
     setSelectedPaths([]);
+    setExpandedPaths(new Set());
   }, [estimate?.provider, estimate?.sourceId, estimate?.requestedRevision, estimate?.resolvedRevision]);
 
   useEffect(() => {
@@ -264,6 +360,7 @@ export function NewTaskPage() {
           disableProxy,
           scheduledAt: scheduledStart?.toISOString(),
           selectedPaths: selectFiles ? selectedPaths : undefined,
+          alias: artifactAlias.trim() || undefined,
         }),
       });
       navigate(`/tasks/${task.id}`);
@@ -287,21 +384,51 @@ export function NewTaskPage() {
     && estimateKey === currentEstimateKey
     && estimate?.downloadable === true;
   const availableVariants = estimate?.ggufVariants ?? [];
+  const selectableFiles = estimate?.selectableFiles ?? [];
+  const usesGgufVariants = estimate?.ggufVariantSelectionAvailable === true
+    && availableVariants.length > 0;
   const normalizedFilter = variantFilter.trim().toLocaleLowerCase();
   const visibleVariants = normalizedFilter
     ? availableVariants.filter((variant) => variant.label.toLocaleLowerCase().includes(normalizedFilter))
     : availableVariants;
+  const fileTree = useMemo(() => buildFileTree(selectableFiles), [selectableFiles]);
+  const visibleFileTree = useMemo(
+    () => filterFileTree(fileTree, normalizedFilter),
+    [fileTree, normalizedFilter],
+  );
   const selectedVariant = availableVariants.find((variant) =>
     variant.paths.length === selectedPaths.length
     && variant.paths.every((path, index) => path === selectedPaths[index])
   );
-  const displaySize = selectFiles && selectedVariant
-    ? selectedVariant.totalSize
+  const selectedPathSet = new Set(selectedPaths);
+  const selectedFiles = selectableFiles.filter((file) => selectedPathSet.has(file.path));
+  const selectedFilesSize = selectedFiles.every((file) => file.size !== undefined)
+    ? selectedFiles.reduce((total, file) => total + (file.size ?? 0), 0)
+    : undefined;
+  const validSelection = usesGgufVariants
+    ? selectedVariant !== undefined
+    : selectedPaths.length > 0 && selectedFiles.length === selectedPaths.length;
+  const displaySize = selectFiles
+    ? usesGgufVariants ? selectedVariant?.totalSize : selectedFilesSize
     : estimate?.totalSize;
-  const displayFileCount = selectFiles && selectedVariant
-    ? selectedVariant.fileCount
+  const displayFileCount = selectFiles
+    ? usesGgufVariants ? selectedVariant?.fileCount : selectedFiles.length
     : estimate?.fileCount;
   const duplicate = estimateIsCurrent && !selectFiles ? estimate?.duplicate : undefined;
+  function toggleSelectedPaths(paths: string[], checked: boolean) {
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      for (const path of paths) checked ? next.add(path) : next.delete(path);
+      return [...next].sort((left, right) => left.localeCompare(right));
+    });
+  }
+  function toggleExpandedPath(path: string) {
+    setExpandedPaths((current) => {
+      const next = new Set(current);
+      next.has(path) ? next.delete(path) : next.add(path);
+      return next;
+    });
+  }
   return <div className="page narrow">
     <Link className="back" to="/tasks">← Downloads</Link>
     <div className="page-head"><div><p className="eyebrow">New ingestion</p><h1>Download a model</h1></div></div>
@@ -365,6 +492,16 @@ export function NewTaskPage() {
           {provider !== "http" && revisionLookup === "error" && `Revision lookup unavailable: ${revisionLookupError}. Manual input is still allowed.`}
           {provider !== "http" && revisionLookup === "idle" && "Enter a complete model ID to load hub revisions, or type a branch, tag, version or commit manually."}
         </span>
+      </label>
+      <label><span className="field-title">Artifact alias <small>Optional</small></span>
+        <input
+          value={artifactAlias}
+          maxLength={128}
+          placeholder="For example: qwen-production"
+          autoComplete="off"
+          onChange={(event) => setArtifactAlias(event.target.value)}
+        />
+        <span className="field-help">A unique label reserved when this task is created. It identifies the published artifact without changing its immutable identity or storage path.</span>
       </label>
       <details className="advanced-options">
         <summary><span><strong>Advanced</strong><small>{configuredMirror || proxyConfigured ? "Server routing is active · routing and delayed start" : "Routing and delayed start"}</small></span></summary>
@@ -461,21 +598,23 @@ export function NewTaskPage() {
             <div><span>Estimated download</span><strong>{displaySize === undefined ? "Size unavailable" : formatBytes(displaySize)}</strong></div>
             <div><span>Files</span><strong>{displayFileCount === undefined ? "Unknown" : displayFileCount.toLocaleString()}</strong></div>
           </div>
-          {estimate.ggufVariantSelectionAvailable && availableVariants.length > 0 && <section className="file-selection">
+          {estimate.fileSelectionAvailable && (usesGgufVariants || selectableFiles.length > 0) && <section className="file-selection">
             <label className="route-option no-border">
               <input type="checkbox" checked={selectFiles} onChange={(event) => {
                 const checked = event.target.checked;
                 setSelectFiles(checked);
                 if (!checked) setSelectedPaths([]);
               }} />
-              <span><strong>Download a specific GGUF variant</strong><small>Only complete, unambiguous variants are offered. All shards in the selected variant are downloaded together.</small></span>
+              <span><strong>{usesGgufVariants ? "Download a specific GGUF variant" : "Select files to download"}</strong><small>{usesGgufVariants ? "Only complete, unambiguous variants are offered. All shards in the selected variant are downloaded together." : "Advanced option for repositories that contain several independent formats or variants."}</small></span>
             </label>
             {selectFiles && <div className="file-selection-body">
+              {!usesGgufVariants && <div className="file-selection-note" role="alert"><strong>Manual selection can produce an unusable artifact.</strong> ModelShelf cannot determine this repository's runtime dependencies. Include every required weight shard, index, config, tokenizer and custom code file.</div>}
               <div className="file-selection-tools">
-                <input type="search" value={variantFilter} placeholder="Filter GGUF variants" aria-label="Filter GGUF variants" onChange={(event) => setVariantFilter(event.target.value)} />
+                <input type="search" value={variantFilter} placeholder={usesGgufVariants ? "Filter GGUF variants" : "Filter files"} aria-label={usesGgufVariants ? "Filter GGUF variants" : "Filter files"} onChange={(event) => setVariantFilter(event.target.value)} />
+                {!usesGgufVariants && <div><button type="button" className="ghost" onClick={() => setSelectedPaths(selectableFiles.map((file) => file.path))}>All</button><button type="button" className="ghost" onClick={() => setSelectedPaths([])}>None</button></div>}
               </div>
               <div className="file-selection-list">
-                {visibleVariants.map((variant) => {
+                {usesGgufVariants && visibleVariants.map((variant) => {
                   const checked = variant.paths.length === selectedPaths.length
                     && variant.paths.every((path, index) => path === selectedPaths[index]);
                   return <label className="file-selection-item" key={variant.label}>
@@ -483,10 +622,11 @@ export function NewTaskPage() {
                     <span><code title={variant.paths.join("\n")}>{variant.label}</code><small>{variant.fileCount > 1 ? `${variant.fileCount} shards · ` : ""}{variant.totalSize === undefined ? "size unavailable" : formatBytes(variant.totalSize)}</small></span>
                   </label>;
                 })}
-                {visibleVariants.length === 0 && <p className="muted">No variants match this filter.</p>}
+                {!usesGgufVariants && <FileTreeRows nodes={visibleFileTree} selected={selectedPathSet} expanded={expandedPaths} searching={normalizedFilter.length > 0} onToggle={toggleSelectedPaths} onExpand={toggleExpandedPath} />}
+                {(usesGgufVariants ? visibleVariants.length === 0 : visibleFileTree.length === 0) && <p className="muted">No {usesGgufVariants ? "variants" : "files"} match this filter.</p>}
               </div>
-              <div className={`file-selection-status ${selectedVariant ? "" : "invalid"}`}>{selectedVariant ? `${selectedVariant.fileCount.toLocaleString()} ${selectedVariant.fileCount === 1 ? "file" : "files"} selected${selectedVariant.totalSize === undefined ? "" : ` · ${formatBytes(selectedVariant.totalSize)}`}` : "Select one GGUF variant."}</div>
-              {estimate.ggufAuxiliaryFiles && estimate.ggufAuxiliaryFiles.length > 0 && <div className="file-selection-note">
+              <div className={`file-selection-status ${validSelection ? "" : "invalid"}`}>{validSelection ? <><strong>{selectionSummary(selectedPaths)}</strong><span>{displayFileCount?.toLocaleString()} {displayFileCount === 1 ? "file" : "files"} selected{displaySize === undefined ? "" : ` · ${formatBytes(displaySize)}`}</span></> : usesGgufVariants ? "Select one GGUF variant." : "Select at least one file."}</div>
+              {usesGgufVariants && estimate.ggufAuxiliaryFiles && estimate.ggufAuxiliaryFiles.length > 0 && <div className="file-selection-note">
                 Auxiliary GGUF files such as projectors are not included. Download the full repository if your runtime needs them.
               </div>}
             </div>}
@@ -508,7 +648,7 @@ export function NewTaskPage() {
           ? <Link className="button existing-action" to={`/tasks/${duplicate.taskId}`}>Open existing task</Link>
           : duplicate?.kind === "artifact"
             ? <Link className="button existing-action" to="/artifacts">View artifact</Link>
-            : <button disabled={busy || !estimateIsCurrent || (selectFiles && !selectedVariant)}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : delayDownload ? "Schedule download" : "Start download"}</button>}
+            : <button disabled={busy || !estimateIsCurrent || (selectFiles && !validSelection)}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : delayDownload ? "Schedule download" : "Start download"}</button>}
       </div>
     </form>
   </div>;

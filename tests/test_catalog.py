@@ -144,6 +144,17 @@ def test_future_manifest_and_storage_layout_versions_are_rejected(tmp_path: Path
         Catalog(tmp_path).initialize()
 
 
+def test_future_artifact_alias_schema_is_rejected(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.initialize()
+    catalog.aliases_path.write_text(
+        json.dumps({"schemaVersion": 2, "artifacts": {}}), encoding="utf-8"
+    )
+
+    with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
+        Catalog(tmp_path).initialize()
+
+
 def test_storage_layout_v1_migration_repairs_only_artifact_ancestors(
     tmp_path: Path,
 ) -> None:
@@ -338,7 +349,7 @@ def test_unversioned_nonempty_index_is_preserved_and_rebuilt(tmp_path: Path) -> 
         connection.execute("CREATE TABLE artifacts (artifact_id TEXT PRIMARY KEY)")
     catalog.initialize()
     with sqlite3.connect(catalog.index_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         columns = {row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()}
     assert "manifest_mtime_ns" in columns
     assert list(catalog.index_path.parent.glob("catalog.sqlite3.invalid-*"))
@@ -432,3 +443,60 @@ def test_delete_removes_artifact_files_and_index_entry(tmp_path: Path) -> None:
     assert catalog.find(manifest.artifact_id) is None
     assert catalog.list() == []
     assert not catalog.delete(manifest.artifact_id)
+
+
+def test_artifact_aliases_are_unique_persistent_and_outside_manifests(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.initialize()
+    first_stage = make_stage(catalog, "alias-first")
+    first = catalog.create_manifest(
+        first_stage, name="model", version="1", source=source("first")
+    )
+    first_path, _ = catalog.publish(first_stage, first)
+    second_stage = make_stage(catalog, "alias-second", b"other")
+    second = catalog.create_manifest(
+        second_stage, name="model", version="2", source=source("second")
+    )
+    catalog.publish(second_stage, second)
+
+    updated = catalog.set_alias(first.artifact_id, "production-model")
+
+    assert updated.alias == "production-model"
+    assert [item.artifact_id for item in catalog.list(query="production-model")] == [
+        first.artifact_id
+    ]
+    assert "alias" not in json.loads(
+        (first_path / ".modelshelf/manifest.json").read_text(encoding="utf-8")
+    )
+    with pytest.raises(ValueError, match="already in use"):
+        catalog.set_alias(second.artifact_id, "production-model")
+
+    rebuilt = Catalog(tmp_path)
+    rebuilt.initialize()
+    found = rebuilt.find(first.artifact_id)
+    assert found is not None and found[0].alias == "production-model"
+
+    registry = json.loads(rebuilt.aliases_path.read_text(encoding="utf-8"))
+    registry["artifacts"][first.artifact_id] = "manually-renamed"
+    rebuilt.aliases_path.write_text(json.dumps(registry), encoding="utf-8")
+    reindexed = Catalog(tmp_path)
+    reindexed.initialize()
+    found = reindexed.find(first.artifact_id)
+    assert found is not None and found[0].alias == "manually-renamed"
+
+    reindexed.set_alias(first.artifact_id, None)
+    found = reindexed.find(first.artifact_id)
+    assert found is not None and found[0].alias is None
+    assert json.loads(reindexed.aliases_path.read_text(encoding="utf-8"))["artifacts"] == {}
+
+
+def test_deleting_artifact_removes_its_alias(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.initialize()
+    stage = make_stage(catalog, "aliased-delete")
+    manifest = catalog.create_manifest(stage, name="model", version="1", source=source())
+    catalog.publish(stage, manifest)
+    catalog.set_alias(manifest.artifact_id, "temporary")
+
+    assert catalog.delete(manifest.artifact_id)
+    assert json.loads(catalog.aliases_path.read_text(encoding="utf-8"))["artifacts"] == {}

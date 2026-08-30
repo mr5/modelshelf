@@ -119,7 +119,8 @@ models:
     provider: modelscope-cn
     id: unsloth/Qwen3-8B-GGUF
     revision: master
-    # Optional; must be one complete GGUF variant recognized by the server.
+    # Optional. Recognized GGUF variants must include every shard.
+    # Other repositories allow manual selection; you are responsible for dependencies.
     files:
       - Qwen3-8B-Q4_K_M.gguf
     # Creates an additional symlink; model bytes remain in canonical storage.
@@ -252,8 +253,9 @@ models:
         "access protected APIs. It is separate from the Web UI password.",
         "- `models`: desired-state list. Optional `revision` accepts a branch, tag, or commit "
         "and defaults to `main`.",
-        "- `files`: optional paths for one complete GGUF variant recognized by the server. "
-        "Every shard is required and the set is part of artifact identity.",
+        "- `files`: optional source paths. ModelShelf keeps recognized GGUF variants complete; "
+        "for other repositories you must include every required shard, index, config, tokenizer, "
+        "and custom code file. The sorted set is part of artifact identity.",
         "- `alias`: optional globally unique CLI name and stable symlink.",
         "- `path`: optional additional symlink, relative to `localBasePath` or absolute.",
         "### Local storage layout",
@@ -280,8 +282,8 @@ models:
         "- `modelshelf mount`: discover and mount the server NFS endpoint.",
         "- `modelshelf unmount`: remove the configured mount and generated Linux systemd units.",
         "- `modelshelf add <provider> <model-id> [-r revision] [--file path] [--alias alias] "
-        "[--path path]`: add desired state and sync it. Repeat `--file` for all shards of one "
-        "recognized GGUF variant.",
+        "[--path path]`: add desired state and sync it. Repeat `--file` for each selected source "
+        "path; recognized GGUF variants must include every shard.",
         "- `modelshelf remove <alias> [-y]`: remove desired state and symlink references. "
         "Canonical files are offered for deletion only when no lock entry references them.",
         "- `modelshelf search <query>`: search published artifacts by model name or ID.",

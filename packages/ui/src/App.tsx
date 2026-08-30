@@ -46,6 +46,7 @@ export function App() {
         <Route index element={<Navigate to={defaultPath} replace />} />
         <Route path="/integration" element={<Suspense fallback={<div className="boot">Loading integration guide…</div>}><IntegrationPage /></Suspense>} />
         <Route path="/artifacts" element={<ArtifactAccess authenticated={authenticated} publicArtifacts={publicArtifacts} />} />
+        <Route path="/artifacts/:artifactId" element={<ArtifactAccess authenticated={authenticated} publicArtifacts={publicArtifacts} />} />
         <Route element={<Protected authenticated={authenticated} />}>
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/tasks/new" element={<NewTaskPage />} />

@@ -537,6 +537,33 @@ def test_auxiliary_gguf_files_do_not_hide_primary_variants() -> None:
     assert estimate["ggufAuxiliaryFiles"] == [{"path": "mmproj-BF16.gguf", "size": 2}]
 
 
+def test_non_gguf_estimate_exposes_files_for_manual_selection() -> None:
+    files = (
+        provider_module.SourceFile("README.md", 10),
+        provider_module.SourceFile("ple_layer_quant.py", 20),
+        provider_module.SourceFile("ples_fp8/META.json", 40),
+        provider_module.SourceFile("ples_fp8/shard_0.safetensors", 100),
+    )
+    estimate = provider_module.DownloadEstimate(
+        Provider.HUGGINGFACE,
+        "primitive-ai/Qwen3.8-Flash-Next-PLE-quant",
+        "main",
+        "a" * 40,
+        170,
+        len(files),
+        files=files,
+    ).as_dict()
+
+    assert estimate["fileSelectionAvailable"] is True
+    assert estimate["ggufVariantSelectionAvailable"] is False
+    assert estimate["selectableFiles"] == [
+        {"path": "ple_layer_quant.py", "size": 20},
+        {"path": "ples_fp8/META.json", "size": 40},
+        {"path": "ples_fp8/shard_0.safetensors", "size": 100},
+        {"path": "README.md", "size": 10},
+    ]
+
+
 def test_provider_error_detail_keeps_the_cause_and_redacts_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

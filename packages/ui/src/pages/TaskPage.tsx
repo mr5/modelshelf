@@ -189,13 +189,14 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
     <section className="task-meta-grid">
       <Detail label="Requested revision" value={task.requestedRevision} mono />
       <Detail label="Resolved revision" value={task.resolvedRevision ?? "Pending resolution"} mono />
+      {task.artifactAlias && <Detail label="Artifact alias" value={task.artifactAlias} />}
       <Detail label="Created" value={new Date(task.createdAt).toLocaleString()} />
       {task.status === "scheduled" && task.scheduledAt && <Detail label="Scheduled start" value={new Date(task.scheduledAt).toLocaleString()} />}
       <Detail label="Network route" value={route} />
     </section>
 
     {task.selectedPaths && <details className="task-selected-files">
-      <summary>GGUF variant files <span>{task.selectedPaths.length.toLocaleString()}</span></summary>
+      <summary>Selected source files <span>{task.selectedPaths.length.toLocaleString()}</span></summary>
       <div>{task.selectedPaths.map((path) => <code key={path}>{path}</code>)}</div>
     </details>}
 

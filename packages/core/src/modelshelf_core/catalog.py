@@ -23,14 +23,21 @@ from .identity import (
     selection_digest,
 )
 from .models import (
+    ArtifactAliases,
     ArtifactManifest,
     ArtifactSummary,
     FileEntry,
     Provider,
     SourceReference,
     StorageLayout,
+    validate_artifact_alias,
 )
-from .schema import FutureSchemaVersionError, load_manifest_json, migrate_storage_layout_json
+from .schema import (
+    FutureSchemaVersionError,
+    load_artifact_aliases_json,
+    load_manifest_json,
+    migrate_storage_layout_json,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +214,10 @@ class Catalog:
         self.incoming_root = self.storage_root / ".incoming"
         self.jobs_root = self.storage_root / ".modelshelf" / "jobs"
         self.layout_path = self.storage_root / ".modelshelf" / "storage.json"
+        self.aliases_path = self.storage_root / ".modelshelf" / "artifact-aliases.json"
         self.index_path = self.storage_root / ".modelshelf" / "catalog.sqlite3"
         self.index = CatalogIndex(self.index_path)
+        self._aliases_lock = threading.RLock()
 
     def initialize(self) -> None:
         for directory in (
@@ -237,6 +246,14 @@ class Catalog:
             atomic_write_json(
                 self.layout_path,
                 layout.model_dump(mode="json", by_alias=True),
+            )
+        if self.aliases_path.exists():
+            load_artifact_aliases_json(self.aliases_path.read_text(encoding="utf-8"))
+        else:
+            aliases = ArtifactAliases(schema_version=1)
+            atomic_write_json(
+                self.aliases_path,
+                aliases.model_dump(mode="json", by_alias=True),
             )
         os.chmod(self.artifacts_root, 0o755)
         self.index.initialize()
@@ -332,7 +349,20 @@ class Catalog:
         raw = (artifact_root / ".modelshelf" / "manifest.json").read_text(encoding="utf-8")
         return load_manifest_json(raw)
 
-    def _summary(self, artifact_root: Path, manifest: ArtifactManifest) -> ArtifactSummary:
+    def _read_aliases(self) -> ArtifactAliases:
+        return load_artifact_aliases_json(self.aliases_path.read_text(encoding="utf-8"))
+
+    def _aliases_by_artifact(self) -> dict[str, str]:
+        with self._aliases_lock:
+            return dict(self._read_aliases().artifacts)
+
+    def _summary(
+        self,
+        artifact_root: Path,
+        manifest: ArtifactManifest,
+        *,
+        aliases: Mapping[str, str] | None = None,
+    ) -> ArtifactSummary:
         relative_path = artifact_relative_path(
             manifest.source.provider,
             manifest.source.id,
@@ -353,6 +383,9 @@ class Catalog:
             file_count=manifest.file_count,
             created_at=manifest.created_at,
             relative_path=relative_path,
+            alias=(aliases if aliases is not None else self._aliases_by_artifact()).get(
+                manifest.artifact_id
+            ),
             selection_digest=selection_digest(manifest.source.selected_paths),
             selected_paths=manifest.source.selected_paths,
         )
@@ -377,6 +410,7 @@ class Catalog:
             existing = {}
         changed: list[tuple[ArtifactSummary, int, int]] = []
         valid_artifact_ids: list[str] = []
+        aliases = self._aliases_by_artifact()
         for manifest_path in _artifact_manifest_paths(self.artifacts_root):
             artifact_root = manifest_path.parent.parent
             relative_path = artifact_root.relative_to(self.artifacts_root).as_posix()
@@ -385,11 +419,15 @@ class Catalog:
                 continue
             try:
                 stat = manifest_path.stat()
-                if existing.get(candidate_id) == (stat.st_mtime_ns, stat.st_size):
+                if existing.get(candidate_id) == (
+                    stat.st_mtime_ns,
+                    stat.st_size,
+                    aliases.get(candidate_id),
+                ):
                     valid_artifact_ids.append(candidate_id)
                     continue
                 manifest = self.read_manifest(artifact_root)
-                summary = self._summary(artifact_root, manifest)
+                summary = self._summary(artifact_root, manifest, aliases=aliases)
                 changed.append((summary, stat.st_mtime_ns, stat.st_size))
                 valid_artifact_ids.append(summary.artifact_id)
             except FutureSchemaVersionError:
@@ -397,6 +435,49 @@ class Catalog:
             except (OSError, ValueError, VerificationError):
                 continue
         self.index.reconcile(changed, valid_artifact_ids)
+
+    def set_alias(self, artifact_id: str, alias: str | None) -> ArtifactSummary:
+        found = self.find(artifact_id)
+        if found is None:
+            raise KeyError(f"unknown artifact {artifact_id}")
+        summary, manifest = found
+        normalized = validate_artifact_alias(alias) if alias is not None else None
+        with self._aliases_lock:
+            registry = self._read_aliases()
+            for existing_artifact_id, existing_alias in registry.artifacts.items():
+                if existing_alias == normalized and existing_artifact_id != artifact_id:
+                    raise ValueError(f"artifact alias {normalized!r} is already in use")
+            updated = dict(registry.artifacts)
+            updated.pop(artifact_id, None)
+            if normalized is not None:
+                updated[artifact_id] = normalized
+            atomic_write_json(
+                self.aliases_path,
+                ArtifactAliases(schema_version=1, artifacts=updated).model_dump(
+                    mode="json", by_alias=True
+                ),
+            )
+        artifact_root = self.artifacts_root / summary.relative_path
+        self._index_artifact(artifact_root, manifest)
+        refreshed = self.index.find(artifact_id)
+        if refreshed is None or refreshed.alias != normalized:
+            self.reconcile_index()
+            refreshed = self.index.find(artifact_id)
+        if refreshed is None or refreshed.alias != normalized:
+            raise VerificationError("artifact index update did not preserve the artifact")
+        return refreshed
+
+    def alias_owner(self, alias: str) -> str | None:
+        normalized = validate_artifact_alias(alias)
+        with self._aliases_lock:
+            return next(
+                (
+                    artifact_id
+                    for artifact_id, existing_alias in self._read_aliases().artifacts.items()
+                    if existing_alias == normalized
+                ),
+                None,
+            )
 
     def list(
         self,
@@ -460,12 +541,29 @@ class Catalog:
         except Exception:
             os.chmod(artifact_root, 0o555)
             raise
-        try:
-            self.index.delete(artifact_id)
-        except Exception:
-            os.rename(tombstone, artifact_root)
-            os.chmod(artifact_root, 0o555)
-            raise
+        with self._aliases_lock:
+            registry = self._read_aliases()
+            updated = dict(registry.artifacts)
+            updated.pop(artifact_id, None)
+            try:
+                if updated != registry.artifacts:
+                    atomic_write_json(
+                        self.aliases_path,
+                        ArtifactAliases(schema_version=1, artifacts=updated).model_dump(
+                            mode="json", by_alias=True
+                        ),
+                    )
+                self.index.delete(artifact_id)
+            except Exception:
+                atomic_write_json(
+                    self.aliases_path,
+                    registry.model_dump(
+                        mode="json", by_alias=True
+                    ),
+                )
+                os.rename(tombstone, artifact_root)
+                os.chmod(artifact_root, 0o555)
+                raise
         _unfreeze_tree(tombstone)
         shutil.rmtree(tombstone)
         parent = artifact_root.parent

@@ -17,6 +17,8 @@ NFSv4.1 只读导出已完成的 artifact。客户端是面向 Linux/macOS、amd
 - 每个 artifact 都包含 `.modelshelf/manifest.json`，记录 source、requested/resolved
   revision、内容摘要，以及每个文件的路径、大小和 SHA-256。
 - 已发布 artifact 不可修改。快速校验检查路径和大小；完整校验额外检查 SHA-256。
+- ModelScope 新 revision 会复用任意旧完整或局部 artifact 中未变化的 Git LFS 文件，只下载
+  缺少的对象，再发布新的不可变 artifact。
 - 文件系统和 manifest 始终是事实来源；损坏或不兼容的 SQLite 索引会被保留并重建。
 - ModelShelf 只负责 ingestion 和存储，不提供推理、RBAC、多租户或调度系统。
 

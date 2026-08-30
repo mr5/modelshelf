@@ -38,11 +38,14 @@ export interface DownloadEstimate {
   downloadable: boolean;
   resolvedRevision?: string;
   totalSize?: number;
+  transferSize?: number;
+  reusedSize?: number;
+  reusablePaths?: string[];
   fileCount?: number;
   hubUrl?: string;
   metadata: EstimateMetadata[];
   fileSelectionAvailable?: boolean;
-  selectableFiles?: Array<{ path: string; size?: number }>;
+  selectableFiles?: Array<{ path: string; size?: number; sha256?: string }>;
   ggufVariantSelectionAvailable?: boolean;
   ggufVariants?: Array<{
     label: string;

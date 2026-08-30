@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -40,6 +41,8 @@ from .schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+_FICLONE = 0x40049409
 
 
 class VerificationError(RuntimeError):
@@ -84,6 +87,7 @@ def inventory(
     workers: int = 1,
     progress: Callable[[int, int], None] | None = None,
     expected_sha256: Mapping[str, str] | None = None,
+    trusted_sha256: Mapping[str, str] | None = None,
     cancelled: threading.Event | None = None,
 ) -> list[FileEntry]:
     if workers < 1:
@@ -104,11 +108,22 @@ def inventory(
     discovered.sort(key=lambda item: item[0])
 
     expected = dict(expected_sha256 or {})
-    missing = sorted(set(expected) - {relative for relative, _path, _size in discovered})
+    trusted = dict(trusted_sha256 or {})
+    for path, digest in trusted.items():
+        expected_digest = expected.get(path)
+        if expected_digest is None:
+            raise VerificationError(f"trusted file is missing source metadata: {path}")
+        if digest != expected_digest:
+            raise VerificationError(
+                f"trusted SHA-256 does not match source metadata: {path}; "
+                f"expected {expected_digest}, got {digest}"
+            )
+    discovered_paths = {relative for relative, _path, _size in discovered}
+    missing = sorted((set(expected) | set(trusted)) - discovered_paths)
     if missing:
         raise VerificationError("expected source files are missing: " + ", ".join(missing[:3]))
 
-    total = sum(size for _relative, _path, size in discovered)
+    total = sum(size for relative, _path, size in discovered if relative not in trusted)
     completed = 0
     progress_lock = threading.Lock()
     stop = cancelled or threading.Event()
@@ -123,6 +138,9 @@ def inventory(
 
     def hash_entry(item: tuple[str, Path, int]) -> FileEntry:
         relative, absolute, size = item
+        trusted_digest = trusted.get(relative)
+        if trusted_digest is not None:
+            return FileEntry(path=relative, size=size, sha256=trusted_digest)
         digest = sha256_file(absolute, progress=report, cancelled=stop)
         expected_digest = expected.get(relative)
         if expected_digest is not None and digest != expected_digest:
@@ -164,6 +182,58 @@ def content_digest(files: list[FileEntry]) -> str:
     return digest.hexdigest()
 
 
+def clone_artifact_file(
+    source: Path,
+    destination: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> str:
+    """Reuse an immutable artifact file, verifying the ordinary-copy fallback inline."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        source_descriptor = os.open(source, os.O_RDONLY)
+        try:
+            destination_descriptor = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                source.stat().st_mode & 0o777,
+            )
+            try:
+                fcntl.ioctl(destination_descriptor, _FICLONE, source_descriptor)
+            finally:
+                os.close(destination_descriptor)
+        finally:
+            os.close(source_descriptor)
+    except OSError:
+        destination.unlink(missing_ok=True)
+    else:
+        return "reflink"
+
+    try:
+        os.link(source, destination)
+    except OSError:
+        destination.unlink(missing_ok=True)
+    else:
+        return "hardlink"
+
+    try:
+        digest = hashlib.sha256()
+        with source.open("rb") as source_stream, destination.open("xb") as destination_stream:
+            while block := source_stream.read(1024 * 1024):
+                destination_stream.write(block)
+                digest.update(block)
+        shutil.copystat(source, destination, follow_symlinks=False)
+        if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
+            raise VerificationError(
+                f"copied artifact file SHA-256 mismatch: {source}; "
+                f"expected {expected_sha256}, got {digest.hexdigest()}"
+            )
+    except (OSError, VerificationError):
+        destination.unlink(missing_ok=True)
+        raise
+    return "copy"
+
+
 def _freeze_tree(root: Path) -> None:
     for current, directories, files in os.walk(root, topdown=False):
         for name in files:
@@ -175,10 +245,8 @@ def _freeze_tree(root: Path) -> None:
 def _unfreeze_tree(root: Path) -> None:
     if not root.exists():
         return
-    for current, directories, files in os.walk(root):
+    for current, directories, _files in os.walk(root):
         os.chmod(current, 0o755)
-        for name in files:
-            os.chmod(Path(current) / name, 0o644)
         for name in directories:
             os.chmod(Path(current) / name, 0o755)
 
@@ -557,9 +625,7 @@ class Catalog:
             except Exception:
                 atomic_write_json(
                     self.aliases_path,
-                    registry.model_dump(
-                        mode="json", by_alias=True
-                    ),
+                    registry.model_dump(mode="json", by_alias=True),
                 )
                 os.rename(tombstone, artifact_root)
                 os.chmod(artifact_root, 0o555)

@@ -414,6 +414,15 @@ export function NewTaskPage() {
   const displayFileCount = selectFiles
     ? usesGgufVariants ? selectedVariant?.fileCount : selectedFiles.length
     : estimate?.fileCount;
+  const reusablePathSet = new Set(estimate?.reusablePaths ?? []);
+  const displayReusedSize = selectFiles
+    ? selectedFiles
+      .filter((file) => reusablePathSet.has(file.path))
+      .reduce((total, file) => total + (file.size ?? 0), 0)
+    : estimate?.reusedSize;
+  const displayTransferSize = displaySize !== undefined && displayReusedSize !== undefined
+    ? Math.max(0, displaySize - displayReusedSize)
+    : estimate?.transferSize;
   const duplicate = estimateIsCurrent && !selectFiles ? estimate?.duplicate : undefined;
   function toggleSelectedPaths(paths: string[], checked: boolean) {
     setSelectedPaths((current) => {
@@ -595,8 +604,10 @@ export function NewTaskPage() {
             {duplicate.taskId && <Link to={`/tasks/${duplicate.taskId}`}>Open existing task →</Link>}
           </div>}
           <div className="estimate-summary">
-            <div><span>Estimated download</span><strong>{displaySize === undefined ? "Size unavailable" : formatBytes(displaySize)}</strong></div>
+            <div><span>{displayReusedSize ? "Artifact content" : "Estimated download"}</span><strong>{displaySize === undefined ? "Size unavailable" : formatBytes(displaySize)}</strong></div>
             <div><span>Files</span><strong>{displayFileCount === undefined ? "Unknown" : displayFileCount.toLocaleString()}</strong></div>
+            {!!displayReusedSize && <div><span>Network download</span><strong>{displayTransferSize === undefined ? "Size unavailable" : formatBytes(displayTransferSize)}</strong></div>}
+            {!!displayReusedSize && <div><span>Reused from shelf</span><strong>{formatBytes(displayReusedSize)}</strong></div>}
           </div>
           {estimate.fileSelectionAvailable && (usesGgufVariants || selectableFiles.length > 0) && <section className="file-selection">
             <label className="route-option no-border">

@@ -98,6 +98,63 @@ def test_parallel_inventory_uses_two_file_hash_workers(
     assert len(worker_names) == 2
 
 
+def test_inventory_trusts_reused_manifest_entries_and_hashes_only_new_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reused = b"already verified" * 100
+    changed = b"new content"
+    (tmp_path / "reused.bin").write_bytes(reused)
+    (tmp_path / "changed.bin").write_bytes(changed)
+    reused_digest = hashlib.sha256(reused).hexdigest()
+    hashed_paths: list[str] = []
+    original_sha256_file = catalog_module.sha256_file
+
+    def tracked_hash(path: Path, **kwargs: object) -> str:
+        hashed_paths.append(path.name)
+        return original_sha256_file(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(catalog_module, "sha256_file", tracked_hash)
+    updates: list[tuple[int, int]] = []
+
+    files = inventory(
+        tmp_path,
+        workers=2,
+        progress=lambda completed, total: updates.append((completed, total)),
+        expected_sha256={
+            "reused.bin": reused_digest,
+            "changed.bin": hashlib.sha256(changed).hexdigest(),
+        },
+        trusted_sha256={"reused.bin": reused_digest},
+    )
+
+    assert hashed_paths == ["changed.bin"]
+    assert updates[0] == (0, len(changed))
+    assert updates[-1] == (len(changed), len(changed))
+    assert {entry.path: entry.sha256 for entry in files} == {
+        "changed.bin": hashlib.sha256(changed).hexdigest(),
+        "reused.bin": reused_digest,
+    }
+
+
+def test_inventory_rejects_invalid_trusted_file_metadata(tmp_path: Path) -> None:
+    payload = b"trusted"
+    (tmp_path / "model.bin").write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    with pytest.raises(VerificationError, match="trusted SHA-256"):
+        inventory(
+            tmp_path,
+            expected_sha256={"model.bin": digest},
+            trusted_sha256={"model.bin": "0" * 64},
+        )
+
+    with pytest.raises(VerificationError, match="missing source metadata"):
+        inventory(
+            tmp_path,
+            trusted_sha256={"model.bin": digest},
+        )
+
+
 def test_manifest_publish_and_verify(tmp_path: Path) -> None:
     catalog = Catalog(tmp_path)
     catalog.initialize()
@@ -123,6 +180,94 @@ def test_manifest_publish_and_verify(tmp_path: Path) -> None:
     (destination / "nested/model.gguf").write_bytes(b"changed")
     assert verify_artifact(destination, full=False) == []
     assert verify_artifact(destination, full=True) == ["sha256: nested/model.gguf"]
+
+
+def test_clone_artifact_file_falls_back_to_hardlink_without_copying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source.bin"
+    destination = tmp_path / "nested/destination.bin"
+    source_path.write_bytes(b"shared blocks")
+
+    def unsupported_reflink(*_args: object, **_kwargs: object) -> None:
+        raise OSError("reflink unavailable")
+
+    monkeypatch.setattr(catalog_module.fcntl, "ioctl", unsupported_reflink)
+
+    method = catalog_module.clone_artifact_file(source_path, destination)
+
+    assert method == "hardlink"
+    assert destination.read_bytes() == b"shared blocks"
+    assert source_path.stat().st_ino == destination.stat().st_ino
+
+
+def test_clone_artifact_file_hashes_the_copy_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source.bin"
+    destination = tmp_path / "destination.bin"
+    source_path.write_bytes(b"copied content")
+
+    monkeypatch.setattr(
+        catalog_module.fcntl,
+        "ioctl",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unsupported")),
+    )
+    monkeypatch.setattr(
+        catalog_module.os,
+        "link",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unsupported")),
+    )
+
+    digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    assert (
+        catalog_module.clone_artifact_file(
+            source_path,
+            destination,
+            expected_sha256=digest,
+        )
+        == "copy"
+    )
+    assert destination.read_bytes() == source_path.read_bytes()
+
+    destination.unlink()
+    with pytest.raises(VerificationError, match="copied artifact file SHA-256 mismatch"):
+        catalog_module.clone_artifact_file(
+            source_path,
+            destination,
+            expected_sha256="0" * 64,
+        )
+    assert not destination.exists()
+
+
+def test_deleting_a_hardlinked_artifact_does_not_make_the_other_artifact_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.initialize()
+    first_stage = make_stage(catalog, "first-linked")
+    first_manifest = catalog.create_manifest(
+        first_stage, name="model", version="1", source=source("revision-1")
+    )
+    first_root, _ = catalog.publish(first_stage, first_manifest)
+    shared_source = first_root / "nested/model.gguf"
+
+    def unsupported_reflink(*_args: object, **_kwargs: object) -> None:
+        raise OSError("reflink unavailable")
+
+    monkeypatch.setattr(catalog_module.fcntl, "ioctl", unsupported_reflink)
+    second_stage = catalog.staging_path("second-linked")
+    shared_destination = second_stage / "nested/model.gguf"
+    assert catalog_module.clone_artifact_file(shared_source, shared_destination) == "hardlink"
+    second_manifest = catalog.create_manifest(
+        second_stage, name="model", version="2", source=source("revision-2")
+    )
+    second_root, _ = catalog.publish(second_stage, second_manifest)
+
+    assert catalog.delete(second_manifest.artifact_id)
+    assert not second_root.exists()
+    assert shared_source.read_bytes() == b"weights"
+    assert (shared_source.stat().st_mode & 0o222) == 0
 
 
 def test_future_manifest_and_storage_layout_versions_are_rejected(tmp_path: Path) -> None:
@@ -449,9 +594,7 @@ def test_artifact_aliases_are_unique_persistent_and_outside_manifests(tmp_path: 
     catalog = Catalog(tmp_path)
     catalog.initialize()
     first_stage = make_stage(catalog, "alias-first")
-    first = catalog.create_manifest(
-        first_stage, name="model", version="1", source=source("first")
-    )
+    first = catalog.create_manifest(first_stage, name="model", version="1", source=source("first"))
     first_path, _ = catalog.publish(first_stage, first)
     second_stage = make_stage(catalog, "alias-second", b"other")
     second = catalog.create_manifest(

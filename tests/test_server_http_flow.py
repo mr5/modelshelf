@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 import zipfile
@@ -695,6 +696,67 @@ def test_provider_metadata_requests_have_a_bounded_timeout(
                 "timed out after 0.01 seconds waiting for the provider"
             )
         time.sleep(0.15)
+
+
+def test_modelscope_estimate_reports_cross_selection_incremental_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_root = tmp_path / "storage"
+    catalog = Catalog(storage_root)
+    catalog.initialize()
+    old_stage = catalog.staging_path("old-partial")
+    old_stage.mkdir(parents=True)
+    payload = b"shared weights"
+    (old_stage / "model.bin").write_bytes(payload)
+    old_manifest = catalog.create_manifest(
+        old_stage,
+        name="model",
+        version="old",
+        source=SourceReference(
+            provider=Provider.MODELSCOPE_CN,
+            id="owner/model",
+            requested_revision="master",
+            resolved_revision="a" * 40,
+            selected_paths=["model.bin"],
+        ),
+    )
+    catalog.publish(old_stage, old_manifest)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    async def fake_estimate(
+        provider: Provider, source_id: str, revision: str, **_network: object
+    ) -> DownloadEstimate:
+        return DownloadEstimate(
+            provider,
+            source_id,
+            revision,
+            "b" * 40,
+            len(payload) + 20,
+            2,
+            files=(
+                SourceFile("model.bin", len(payload), digest),
+                SourceFile("new.bin", 20, "f" * 64),
+            ),
+        )
+
+    monkeypatch.setattr(app_module, "estimate_download", fake_estimate)
+    settings = Settings(
+        storage_root=storage_root,
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.get(
+            "/api/v1/providers/modelscope-cn/estimate",
+            params={"id": "owner/model", "revision": "master"},
+            headers={"Authorization": "Bearer write-token"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reusablePaths"] == ["model.bin"]
+    assert body["reusedSize"] == len(payload)
+    assert body["transferSize"] == 20
 
 
 def test_estimate_reports_an_existing_immutable_artifact(

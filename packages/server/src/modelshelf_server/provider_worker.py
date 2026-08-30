@@ -68,6 +68,7 @@ async def _main(payload: dict[str, Any]) -> None:
         progress,
         expected_resolved_revision=payload.get("expectedResolvedRevision"),
         selected_paths=payload.get("selectedPaths"),
+        reusable_artifact_roots=[Path(value) for value in payload.get("reusableArtifactRoots", [])],
         **common,
     )
     _emit(
@@ -79,6 +80,7 @@ async def _main(payload: dict[str, Any]) -> None:
                 "downloadedFile": result.downloaded_file,
                 "contentDisposition": result.content_disposition,
                 "expectedSha256": result.expected_sha256,
+                "fetchedPaths": result.fetched_paths,
             },
         }
     )

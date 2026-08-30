@@ -17,9 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
+from uuid import uuid4
 
 import httpx
-from modelshelf_core import Provider
+from modelshelf_core import Catalog, Provider, VerificationError
+from modelshelf_core.catalog import clone_artifact_file
 
 Progress = Callable[[int, int | None], Awaitable[None]]
 OFFICIAL_HUGGINGFACE_ENDPOINT = "https://huggingface.co"
@@ -39,6 +41,7 @@ class ProviderResult:
     downloaded_file: str | None = None
     content_disposition: str | None = None
     expected_sha256: dict[str, str] | None = None
+    fetched_paths: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -114,11 +117,14 @@ class EstimateMetadata:
 class SourceFile:
     path: str
     size: int | None = None
+    sha256: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {"path": self.path}
         if self.size is not None:
             result["size"] = self.size
+        if self.sha256 is not None:
+            result["sha256"] = self.sha256
         return result
 
 
@@ -1159,7 +1165,7 @@ def _estimate_from_dict(data: dict[str, Any]) -> DownloadEstimate:
         if isinstance(item, dict) and "label" in item and "value" in item
     )
     files = tuple(
-        SourceFile(str(item["path"]), item.get("size"))
+        SourceFile(str(item["path"]), item.get("size"), item.get("sha256"))
         for item in data.get("files", [])
         if isinstance(item, dict) and item.get("path")
     )
@@ -1246,6 +1252,7 @@ async def _isolated_download(
     direct: bool,
     expected_resolved_revision: str | None,
     selected_paths: list[str] | None,
+    reusable_artifact_roots: list[Path] | None,
 ) -> ProviderResult:
     payload = {
         "operation": "download",
@@ -1261,6 +1268,7 @@ async def _isolated_download(
         "mirrorUrl": mirror_url,
         "expectedResolvedRevision": expected_resolved_revision,
         "selectedPaths": selected_paths,
+        "reusableArtifactRoots": [str(path) for path in reusable_artifact_roots or []],
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -1327,6 +1335,9 @@ async def _isolated_download(
         downloaded_file=result.get("downloadedFile"),
         content_disposition=result.get("contentDisposition"),
         expected_sha256=result.get("expectedSha256"),
+        fetched_paths=[str(path) for path in result["fetchedPaths"]]
+        if result.get("fetchedPaths") is not None
+        else None,
     )
 
 
@@ -1474,6 +1485,7 @@ async def download_modelscope(
     token: str | None,
     expected_resolved_revision: str | None = None,
     selected_paths: list[str] | None = None,
+    reusable_artifact_roots: list[Path] | None = None,
 ) -> ProviderResult:
     resolved = await _resolve_modelscope_revision(
         provider, source_id, revision, endpoint=endpoint, token=token
@@ -1484,7 +1496,8 @@ async def download_modelscope(
             f"expected {expected_resolved_revision}, got {resolved}"
         )
     expected_sha256: dict[str, str] | None = None
-    if selected_paths:
+    fetched_paths: list[str] | None = None
+    if selected_paths and not reusable_artifact_roots:
         await _download_modelscope_selected(
             source_id,
             revision,
@@ -1503,7 +1516,7 @@ async def download_modelscope(
                 f"expected {resolved}, got {resolved_after_download}"
             )
     else:
-        expected_sha256 = await _download_modelscope_git(
+        expected_sha256, fetched_paths = await _download_modelscope_git(
             source_id,
             revision,
             resolved,
@@ -1511,8 +1524,14 @@ async def download_modelscope(
             progress,
             endpoint,
             token,
+            selected_paths=selected_paths,
+            reusable_artifact_roots=reusable_artifact_roots,
         )
-    return ProviderResult(resolved_revision=resolved, expected_sha256=expected_sha256)
+    return ProviderResult(
+        resolved_revision=resolved,
+        expected_sha256=expected_sha256,
+        fetched_paths=fetched_paths,
+    )
 
 
 async def _download_modelscope_selected(
@@ -1556,9 +1575,15 @@ async def _download_modelscope_git(
     progress: Progress,
     endpoint: str,
     token: str | None,
-) -> dict[str, str]:
+    *,
+    selected_paths: list[str] | None = None,
+    reusable_artifact_roots: list[Path] | None = None,
+) -> tuple[dict[str, str], list[str]]:
     lfs_paths: set[Path] = set()
     expected_sha256: dict[str, str] = {}
+    fetched_paths: list[str] = []
+    incremental = bool(reusable_artifact_roots)
+    transfer_total: list[int | None] = [None]
 
     def operation() -> str:
         lfs = subprocess.run(
@@ -1579,17 +1604,105 @@ async def _download_modelscope_git(
             token,
             skip_lfs=True,
         )
-        for path in destination.rglob("*"):
+        selected = set(selected_paths) if selected_paths is not None else None
+        worktree_paths = [
+            path
+            for path in destination.rglob("*")
+            if (path.is_file() or path.is_symlink())
+            and ".git" not in path.relative_to(destination).parts
+        ]
+        lfs_entries: list[tuple[Path, str, int]] = []
+        regular_file_size = 0
+        for path in worktree_paths:
+            relative = path.relative_to(destination)
+            relative_text = relative.as_posix()
+            if selected is not None and relative_text not in selected:
+                continue
             if not path.is_file():
                 continue
             pointer = _modelscope_lfs_pointer(path)
             if pointer is None:
+                regular_file_size += path.stat().st_size
                 continue
-            relative = path.relative_to(destination)
             lfs_paths.add(relative)
-            expected_sha256[relative.as_posix()] = pointer[0]
+            expected_sha256[relative_text] = pointer[0]
+            lfs_entries.append((relative, pointer[0], pointer[1]))
+        reusable_files = _modelscope_reusable_files(
+            source_id,
+            reusable_artifact_roots or [],
+            {(path.as_posix(), object_id, size) for path, object_id, size in lfs_entries},
+        )
+        missing_lfs: list[tuple[Path, str, int]] = []
+        for relative, object_id, size in lfs_entries:
+            path = destination / relative
+            relative_text = relative.as_posix()
+            reusable = reusable_files.get((relative_text, object_id, size))
+            if reusable is None:
+                missing_lfs.append((relative, object_id, size))
+                continue
+            temporary = path.with_name(f".{path.name}.modelshelf-reuse-{uuid4()}")
+            try:
+                clone_artifact_file(reusable, temporary, expected_sha256=object_id)
+                os.replace(temporary, path)
+            except (OSError, VerificationError):
+                temporary.unlink(missing_ok=True)
+                missing_lfs.append((relative, object_id, size))
+        fetched_paths.extend(relative.as_posix() for relative, _object_id, _size in missing_lfs)
+        transfer_total[0] = regular_file_size + sum(size for _path, _object_id, size in missing_lfs)
         environment.pop("GIT_LFS_SKIP_SMUDGE", None)
-        _checked_modelscope_git(["git", "-C", str(destination), "lfs", "pull"], environment)
+        if reusable_artifact_roots or selected is not None:
+            full_pull = any("," in path.as_posix() for path, _object_id, _size in missing_lfs)
+            if full_pull:
+                _checked_modelscope_git(["git", "-C", str(destination), "lfs", "pull"], environment)
+            for batch_start in range(0, len(missing_lfs), 128):
+                batch = missing_lfs[batch_start : batch_start + 128]
+                if not full_pull:
+                    include = _modelscope_lfs_include(
+                        [path.as_posix() for path, _object_id, _size in batch]
+                    )
+                    assert include is not None
+                    _checked_modelscope_git(
+                        [
+                            "git",
+                            "-C",
+                            str(destination),
+                            "lfs",
+                            "fetch",
+                            f"--include={include}",
+                            "origin",
+                            resolved_revision,
+                        ],
+                        environment,
+                    )
+                _checked_modelscope_git(
+                    [
+                        "git",
+                        "-C",
+                        str(destination),
+                        "lfs",
+                        "checkout",
+                        *(path.as_posix() for path, _object_id, _size in batch),
+                    ],
+                    environment,
+                )
+        else:
+            _checked_modelscope_git(["git", "-C", str(destination), "lfs", "pull"], environment)
+        if selected is not None:
+            for path in worktree_paths:
+                relative_text = path.relative_to(destination).as_posix()
+                if relative_text not in selected and (path.is_file() or path.is_symlink()):
+                    path.unlink()
+            for path in sorted(
+                (
+                    path
+                    for path in destination.rglob("*")
+                    if path.is_dir() and ".git" not in path.relative_to(destination).parts
+                ),
+                key=lambda item: len(item.parts),
+                reverse=True,
+            ):
+                with contextlib.suppress(OSError):
+                    path.rmdir()
         shutil.rmtree(destination / ".git")
         return str(destination)
 
@@ -1613,8 +1726,64 @@ async def _download_modelscope_git(
         )
         return worktree_size + lfs_size
 
-    await _blocking_download(operation, destination, progress, download_size)
-    return expected_sha256
+    async def report(downloaded: int, total: int | None) -> None:
+        incremental_total = transfer_total[0] if incremental else None
+        await progress(
+            min(downloaded, incremental_total) if incremental_total is not None else downloaded,
+            incremental_total if incremental_total is not None else total,
+        )
+
+    await _blocking_download(
+        operation,
+        destination,
+        report,
+        download_size,
+        report_final=not incremental,
+    )
+    if incremental and transfer_total[0] is not None:
+        await progress(transfer_total[0], transfer_total[0])
+    return expected_sha256, sorted(fetched_paths)
+
+
+def _modelscope_lfs_include(paths: list[str]) -> str | None:
+    if any("," in path for path in paths):
+        return None
+    return ",".join(
+        "/"
+        + "".join(f"\\{character}" if character in "\\*?[]!#" else character for character in path)
+        for path in paths
+    )
+
+
+def _modelscope_reusable_files(
+    source_id: str,
+    artifact_roots: list[Path],
+    wanted: set[tuple[str, str, int]],
+) -> dict[tuple[str, str, int], Path]:
+    reusable: dict[tuple[str, str, int], Path] = {}
+    for artifact_root in artifact_roots:
+        try:
+            manifest = Catalog.read_manifest(artifact_root)
+        except (OSError, ValueError):
+            continue
+        if manifest.source.id != source_id or manifest.source.provider not in MODELSCOPE_PROVIDERS:
+            continue
+        for entry in manifest.files:
+            key = (entry.path, entry.sha256, entry.size)
+            if key not in wanted or key in reusable:
+                continue
+            candidate = artifact_root / entry.path
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                if candidate.stat().st_size != entry.size:
+                    continue
+            except OSError:
+                continue
+            reusable[key] = candidate
+        if len(reusable) == len(wanted):
+            break
+    return reusable
 
 
 def _modelscope_git_environment(token: str | None, *, skip_lfs: bool) -> dict[str, str]:
@@ -1716,15 +1885,17 @@ def _modelscope_lfs_pointer(path: Path) -> tuple[str, int] | None:
     return oid.group(1).decode("ascii"), int(size.group(1))
 
 
-def _modelscope_lfs_pointer_size(path: Path) -> int | None:
+def _modelscope_git_source_file(path: Path, destination: Path) -> SourceFile:
     pointer = _modelscope_lfs_pointer(path)
-    return pointer[1] if pointer is not None else None
-
-
-def _modelscope_git_file_size(path: Path) -> int:
-    if path.is_symlink():
-        return len(os.readlink(path).encode())
-    return _modelscope_lfs_pointer_size(path) or path.stat().st_size
+    return SourceFile(
+        path.relative_to(destination).as_posix(),
+        pointer[1]
+        if pointer is not None
+        else len(os.readlink(path).encode())
+        if path.is_symlink()
+        else path.stat().st_size,
+        pointer[0] if pointer is not None else None,
+    )
 
 
 def _estimate_modelscope_git(
@@ -1750,13 +1921,7 @@ def _estimate_modelscope_git(
             for path in destination.rglob("*")
             if (path.is_file() or path.is_symlink()) and ".git" not in path.parts
         ]
-        files = tuple(
-            SourceFile(
-                path.relative_to(destination).as_posix(),
-                _modelscope_git_file_size(path),
-            )
-            for path in paths
-        )
+        files = tuple(_modelscope_git_source_file(path, destination) for path in paths)
         return sum(file.size or 0 for file in files), files
 
 
@@ -1997,6 +2162,7 @@ async def run_provider(
     disable_proxy: bool = False,
     expected_resolved_revision: str | None = None,
     selected_paths: list[str] | None = None,
+    reusable_artifact_roots: list[Path] | None = None,
     _isolated: bool = False,
 ) -> ProviderResult:
     if provider in ISOLATED_DOWNLOAD_PROVIDERS and not _isolated:
@@ -2015,6 +2181,7 @@ async def run_provider(
             direct=disable_proxy,
             expected_resolved_revision=expected_resolved_revision,
             selected_paths=selected_paths,
+            reusable_artifact_roots=reusable_artifact_roots,
         )
     if provider is Provider.HUGGINGFACE:
         endpoint = _provider_endpoint(provider, mirror_url or huggingface_mirror, disable_mirror)
@@ -2039,6 +2206,7 @@ async def run_provider(
             _modelscope_token(provider),
             expected_resolved_revision,
             selected_paths,
+            reusable_artifact_roots,
         )
     if provider is Provider.KAGGLE:
         return await download_kaggle(source_id, revision, destination, progress)

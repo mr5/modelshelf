@@ -46,6 +46,7 @@ from .providers import (
     ProviderRequestError,
     ProviderUnavailable,
     RevisionDiscovery,
+    _modelscope_reusable_files,
     discover_gguf_variants,
     discover_revisions,
     estimate_download,
@@ -793,6 +794,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             response["selectedPaths"] = normalized_selection
             response["totalSize"] = selected_total
             response["fileCount"] = selected_count
+        if result.provider in {Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}:
+            selected = set(normalized_selection) if normalized_selection is not None else None
+            wanted = {
+                (file.path, file.sha256, file.size)
+                for file in result.files
+                if file.sha256 is not None
+                and file.size is not None
+                and (selected is None or file.path in selected)
+            }
+            reusable = _modelscope_reusable_files(
+                result.source_id,
+                manager.reusable_artifact_roots(
+                    result.provider, result.source_id, result.resolved_revision
+                ),
+                {(path, digest, size) for path, digest, size in wanted},
+            )
+            if reusable:
+                reusable_paths = sorted(path for path, _digest, _size in reusable)
+                reused_size = sum(size for _path, _digest, size in reusable)
+                response["reusablePaths"] = reusable_paths
+                response["reusedSize"] = reused_size
+                total_size = response.get("totalSize")
+                if isinstance(total_size, int):
+                    response["transferSize"] = max(0, total_size - reused_size)
         duplicate = manager.find_duplicate(
             result.provider,
             result.source_id,

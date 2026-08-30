@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 from collections.abc import Callable
@@ -11,6 +12,7 @@ import modelshelf_server.tasks as task_module
 import pytest
 from modelshelf_core import (
     Catalog,
+    FileEntry,
     FutureSchemaVersionError,
     Provider,
     SourceReference,
@@ -994,6 +996,135 @@ def test_modelscope_download_uses_requested_revision_with_preflight_commit_guard
 
     asyncio.run(exercise())
     assert captured == {"revision": "master", "expected": resolved}
+
+
+def test_modelscope_download_can_reuse_artifacts_with_a_different_file_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    old_stage = catalog.staging_path("old-partial")
+    old_stage.mkdir(parents=True)
+    (old_stage / "model.bin").write_bytes(b"old")
+    old_manifest = catalog.create_manifest(
+        old_stage,
+        name="model",
+        version="old",
+        source=SourceReference(
+            provider=Provider.MODELSCOPE_CN,
+            id="owner/model",
+            requested_revision="master",
+            resolved_revision="a" * 40,
+            selected_paths=["model.bin"],
+        ),
+    )
+    old_root, _ = catalog.publish(old_stage, old_manifest)
+    captured_roots: list[Path] = []
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        _progress: Progress,
+        **options: object,
+    ) -> ProviderResult:
+        captured_roots.extend(options["reusable_artifact_roots"])  # type: ignore[arg-type]
+        (destination / "model.bin").write_bytes(b"old")
+        (destination / "new.bin").write_bytes(b"new")
+        return ProviderResult(resolved_revision="b" * 40)
+
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.MODELSCOPE_CN,
+                "owner/model",
+                "master",
+                resolved_revision="b" * 40,
+                selected_paths=["model.bin", "new.bin"],
+            )
+            await asyncio.wait_for(manager.queue.join(), timeout=2)
+            current = manager.store.get(task.id)
+            assert current is not None and current.status is TaskStatus.COMPLETED
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+    assert captured_roots == [old_root]
+
+
+def test_modelscope_incremental_task_hashes_only_untrusted_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reused_payload = b"already verified weights"
+    changed_payload = b"new metadata"
+    reused_digest = hashlib.sha256(reused_payload).hexdigest()
+    changed_digest = hashlib.sha256(changed_payload).hexdigest()
+    observed_trusted_sha256: list[dict[str, str]] = []
+    original_inventory = task_module.inventory
+
+    def tracked_inventory(*args: object, **kwargs: object) -> list[FileEntry]:
+        trusted = kwargs.get("trusted_sha256")
+        observed_trusted_sha256.append(dict(trusted) if isinstance(trusted, dict) else {})
+        return original_inventory(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def fake_provider(
+        _provider: Provider,
+        _source_id: str,
+        _revision: str,
+        destination: Path,
+        progress: Progress,
+        **_options: object,
+    ) -> ProviderResult:
+        (destination / "model.bin").write_bytes(reused_payload)
+        (destination / "config.json").write_bytes(changed_payload)
+        await progress(len(changed_payload), len(changed_payload))
+        return ProviderResult(
+            resolved_revision="c" * 40,
+            expected_sha256={
+                "model.bin": reused_digest,
+                "config.json": changed_digest,
+            },
+            fetched_paths=["config.json"],
+        )
+
+    monkeypatch.setattr(task_module, "inventory", tracked_inventory)
+    monkeypatch.setattr(task_module, "run_provider", fake_provider)
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.MODELSCOPE_CN,
+                "owner/model",
+                "master",
+                resolved_revision="c" * 40,
+                total_bytes=len(reused_payload) + len(changed_payload),
+            )
+            await asyncio.wait_for(manager.queue.join(), timeout=2)
+            completed = manager.store.get(task.id)
+            assert completed is not None and completed.status is TaskStatus.COMPLETED
+            assert completed.verification_total_bytes == len(changed_payload)
+            found = catalog.find(completed.artifact_id or "")
+            assert found is not None
+            _summary, manifest = found
+            assert manifest.total_size == len(reused_payload) + len(changed_payload)
+            assert {entry.path: entry.sha256 for entry in manifest.files} == {
+                "config.json": changed_digest,
+                "model.bin": reused_digest,
+            }
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+    assert observed_trusted_sha256 == [{"model.bin": reused_digest}]
 
 
 def test_download_rejects_content_that_does_not_match_preflight_size(

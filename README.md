@@ -19,6 +19,8 @@ and macOS on amd64 and arm64.
   revision, content digest, and each file's path, size, and SHA-256.
 - Published artifacts are immutable. Quick verification checks paths and sizes; full verification
   also checks SHA-256.
+- New ModelScope revisions reuse unchanged Git LFS files from any earlier full or partial artifact;
+  only missing objects are fetched before a new immutable artifact is published.
 - The filesystem and manifests remain authoritative. A corrupt or incompatible SQLite index is
   preserved and rebuilt.
 - ModelShelf provides ingestion and storage, not inference, RBAC, multi-tenancy, or scheduling.

@@ -261,6 +261,20 @@ class TaskManager:
         self._next_queue_position += 1
         return position
 
+    def reusable_artifact_roots(
+        self,
+        provider: Provider,
+        source_id: str,
+        resolved_revision: str | None,
+    ) -> list[Path]:
+        if provider not in {Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}:
+            return []
+        return [
+            self.catalog.artifacts_root / summary.relative_path
+            for summary in self.catalog.list(provider=provider)
+            if summary.source_id == source_id and summary.resolved_revision != resolved_revision
+        ]
+
     @staticmethod
     def _queue_order(task: DownloadTask) -> tuple[int, datetime]:
         position = task.queue_position if task.queue_position is not None else 2**63 - 1
@@ -523,9 +537,7 @@ class TaskManager:
         async with self._artifact_lock:
             return self.catalog.delete(artifact_id)
 
-    async def set_artifact_alias(
-        self, artifact_id: str, alias: str | None
-    ) -> ArtifactSummary:
+    async def set_artifact_alias(self, artifact_id: str, alias: str | None) -> ArtifactSummary:
         async with self._create_lock:
             self._ensure_alias_available(alias, allow_artifact_id=artifact_id)
             async with self._artifact_lock:
@@ -633,9 +645,7 @@ class TaskManager:
                         raise ValueError("the duplicate artifact disappeared during task creation")
                     existing_alias = found[0].alias
                     if artifact_alias is not None and existing_alias not in {None, artifact_alias}:
-                        raise ValueError(
-                            f"this artifact already has alias {existing_alias!r}"
-                        )
+                        raise ValueError(f"this artifact already has alias {existing_alias!r}")
                     if artifact_alias is not None and existing_alias is None:
                         self._ensure_alias_available(
                             artifact_alias, allow_artifact_id=duplicate.artifact_id
@@ -673,9 +683,7 @@ class TaskManager:
                             "this download task already reserves artifact alias "
                             f"{existing_task.artifact_alias!r}"
                         )
-                    self._ensure_alias_available(
-                        artifact_alias, exclude_task_id=existing_task.id
-                    )
+                    self._ensure_alias_available(artifact_alias, exclude_task_id=existing_task.id)
                     updated = self.store.update(
                         existing_task.id, {"artifact_alias": artifact_alias}
                     )
@@ -758,9 +766,7 @@ class TaskManager:
             None,
         )
         if reserving is not None:
-            raise ValueError(
-                f"artifact alias {alias!r} is reserved by task {reserving.id}"
-            )
+            raise ValueError(f"artifact alias {alias!r} is reserved by task {reserving.id}")
 
     def reorder_queued(self, ordered_task_ids: list[str]) -> list[DownloadTask]:
         if len(ordered_task_ids) != len(set(ordered_task_ids)):
@@ -967,6 +973,7 @@ class TaskManager:
         root: Path,
         *,
         expected_sha256: Mapping[str, str] | None = None,
+        trusted_sha256: Mapping[str, str] | None = None,
     ) -> list[FileEntry]:
         task = self.store.get(task_id)
         detail = task.verification_detail if task is not None else None
@@ -984,6 +991,7 @@ class TaskManager:
                 task_id,
                 root,
                 expected_sha256=expected_sha256,
+                trusted_sha256=trusted_sha256,
             )
 
     async def _verify_inventory_unlocked(
@@ -992,6 +1000,7 @@ class TaskManager:
         root: Path,
         *,
         expected_sha256: Mapping[str, str] | None = None,
+        trusted_sha256: Mapping[str, str] | None = None,
     ) -> list[FileEntry]:
         progress_lock = threading.Lock()
         progress_state = (0, 0)
@@ -1009,6 +1018,7 @@ class TaskManager:
                 workers=_VERIFICATION_WORKERS,
                 progress=record_progress,
                 expected_sha256=expected_sha256,
+                trusted_sha256=trusted_sha256,
                 cancelled=cancelled,
             )
         )
@@ -1113,6 +1123,7 @@ class TaskManager:
                 "downloadedFile": result.downloaded_file,
                 "contentDisposition": result.content_disposition,
                 "expectedSha256": result.expected_sha256,
+                "fetchedPaths": result.fetched_paths,
             },
         )
 
@@ -1126,6 +1137,11 @@ class TaskManager:
         expected = value.get("expectedSha256")
         if expected is not None and not isinstance(expected, dict):
             raise RuntimeError("staged provider result has invalid source hashes")
+        fetched = value.get("fetchedPaths")
+        if fetched is not None and (
+            not isinstance(fetched, list) or not all(isinstance(path, str) for path in fetched)
+        ):
+            raise RuntimeError("staged provider result has invalid fetched paths")
         return ProviderResult(
             resolved_revision=str(value.get("resolvedRevision") or ""),
             source_url=value.get("sourceUrl"),
@@ -1134,6 +1150,7 @@ class TaskManager:
             expected_sha256={str(path): str(digest) for path, digest in expected.items()}
             if expected is not None
             else None,
+            fetched_paths=[str(path) for path in fetched] if fetched is not None else None,
         )
 
     def _save_verified_inventory(self, stage: Path, files: list[FileEntry]) -> None:
@@ -1187,7 +1204,7 @@ class TaskManager:
                 self._start_metrics(task)
 
                 async def report_progress(downloaded: int, reported_total: int | None) -> None:
-                    total = task.total_bytes if task.total_bytes is not None else reported_total
+                    total = reported_total if reported_total is not None else task.total_bytes
                     transferred = min(downloaded, total) if total is not None else downloaded
                     await self._progress(task_id, transferred, total)
 
@@ -1216,6 +1233,9 @@ class TaskManager:
                     disable_proxy=task.disable_proxy,
                     expected_resolved_revision=task.resolved_revision,
                     selected_paths=task.selected_paths,
+                    reusable_artifact_roots=self.reusable_artifact_roots(
+                        task.provider, task.source_id, task.resolved_revision
+                    ),
                 )
             self._raise_if_stopped(task_id)
             if (
@@ -1230,6 +1250,20 @@ class TaskManager:
             await self._stop_metrics(task_id, clear_eta=True)
             files = self._load_verified_inventory(stage) if resume_from_stage else None
             if files is None:
+                trusted_sha256: dict[str, str] | None = None
+                if result.expected_sha256 is not None and result.fetched_paths is not None:
+                    fetched = set(result.fetched_paths)
+                    unexpected_fetched = sorted(fetched - set(result.expected_sha256))
+                    if unexpected_fetched:
+                        raise RuntimeError(
+                            "provider reported fetched paths without source hashes: "
+                            + ", ".join(unexpected_fetched[:3])
+                        )
+                    trusted_sha256 = {
+                        path: digest
+                        for path, digest in result.expected_sha256.items()
+                        if path not in fetched
+                    }
                 await self._update(
                     task_id,
                     status=TaskStatus.VERIFYING,
@@ -1239,13 +1273,15 @@ class TaskManager:
                     instantaneous_bytes_per_second=0,
                     eta_seconds=None,
                     verification_bytes_completed=0,
-                    verification_total_bytes=task.total_bytes,
+                    verification_total_bytes=None if trusted_sha256 else task.total_bytes,
                     verification_instantaneous_bytes_per_second=0,
                     verification_average_bytes_per_second=0,
                     verification_eta_seconds=None,
                     verification_elapsed_seconds=0,
                     verification_detail=(
-                        "Hashing files and checking source integrity"
+                        "Checking file metadata and hashing new content"
+                        if trusted_sha256
+                        else "Hashing files and checking source integrity"
                         if result.expected_sha256
                         else "Hashing files for the artifact manifest"
                     ),
@@ -1254,6 +1290,7 @@ class TaskManager:
                     task_id,
                     download_root,
                     expected_sha256=result.expected_sha256,
+                    trusted_sha256=trusted_sha256,
                 )
                 self._save_verified_inventory(stage, files)
             else:

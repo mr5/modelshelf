@@ -12,7 +12,7 @@ import huggingface_hub
 import kagglehub  # type: ignore[import-untyped]
 import modelshelf_server.providers as provider_module
 import pytest
-from modelshelf_core import Provider
+from modelshelf_core import Catalog, Provider, SourceReference
 from modelshelf_server.providers import (
     ProviderResult,
     _parse_ls_remote,
@@ -37,6 +37,14 @@ def test_modelscope_ls_remote_prefers_peeled_tag_then_branch() -> None:
     assert _parse_ls_remote(f"{'4' * 40}\trefs/heads/master\n", "master") == "4" * 40
     with pytest.raises(RuntimeError, match="did not resolve"):
         _parse_ls_remote("", "missing")
+
+
+def test_modelscope_lfs_include_anchors_and_escapes_literal_paths() -> None:
+    assert (
+        provider_module._modelscope_lfs_include(["weights/model[1]*.bin", "root file.bin"])
+        == "/weights/model\\[1\\]\\*.bin,/root file.bin"
+    )
+    assert provider_module._modelscope_lfs_include(["weights/model,1.bin"]) is None
 
 
 def test_modelscope_sites_use_independent_endpoints_and_tokens(
@@ -295,7 +303,7 @@ def test_modelscope_download_uses_requested_revision_and_verifies_immutable_comm
     resolved = "e823e888ae179eb3be02c1a48899c4f828371376"
     captured: dict[str, object] = {}
 
-    async def git_download(*args: object) -> None:
+    async def git_download(*args: object, **kwargs: object) -> tuple[dict[str, str], list[str]]:
         captured["source_id"] = args[0]
         captured["revision"] = args[1]
         captured["resolved"] = args[2]
@@ -303,6 +311,8 @@ def test_modelscope_download_uses_requested_revision_and_verifies_immutable_comm
         assert isinstance(destination, Path)
         destination.mkdir(parents=True, exist_ok=True)
         (destination / "config.json").write_text("{}", encoding="utf-8")
+        assert kwargs == {"selected_paths": None, "reusable_artifact_roots": None}
+        return {}, []
 
     monkeypatch.setattr(provider_module, "_download_modelscope_git", git_download)
 
@@ -439,6 +449,9 @@ def test_modelscope_git_estimate_uses_lfs_object_sizes(
     assert total_size == 1048576 + len("*.bin filter=lfs\n") + len("{}")
     assert len(files) == 3
     assert {file.path for file in files} == {".gitattributes", "config.json", "model.bin"}
+    by_path = {file.path: file for file in files}
+    assert by_path["model.bin"].sha256 == "a" * 64
+    assert by_path["config.json"].sha256 is None
 
 
 def test_modelscope_estimate_resolves_revision_before_reading_git_metadata(
@@ -656,7 +669,7 @@ def test_modelscope_git_download_defers_lfs_integrity_to_manifest_hashing(
     monkeypatch.setattr(provider_module, "_prepare_modelscope_git_checkout", fake_checkout)
     monkeypatch.setattr(provider_module, "_checked_modelscope_git", fake_git)
 
-    expected = asyncio.run(
+    expected, fetched = asyncio.run(
         provider_module._download_modelscope_git(
             "owner/model",
             "master",
@@ -669,8 +682,109 @@ def test_modelscope_git_download_defers_lfs_integrity_to_manifest_hashing(
     )
 
     assert expected == {"model.bin": oid}
+    assert fetched == ["model.bin"]
     assert len(commands) == 1
     assert not (destination / ".git").exists()
+
+
+def test_modelscope_git_download_reuses_matching_lfs_files_from_any_prior_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_payload = b"unchanged model weights"
+    new_payload = b"new scale metadata"
+    old_oid = hashlib.sha256(old_payload).hexdigest()
+    new_oid = hashlib.sha256(new_payload).hexdigest()
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    old_stage = catalog.staging_path("old-selection")
+    old_stage.mkdir(parents=True)
+    (old_stage / "model.bin").write_bytes(old_payload)
+    old_manifest = catalog.create_manifest(
+        old_stage,
+        name="model",
+        version="old",
+        source=SourceReference(
+            provider=Provider.MODELSCOPE_CN,
+            id="owner/model",
+            requested_revision="master",
+            resolved_revision="a" * 40,
+            selected_paths=["model.bin"],
+        ),
+    )
+    old_root, _ = catalog.publish(old_stage, old_manifest)
+    destination = tmp_path / "incremental"
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        provider_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    def fake_checkout(*_args: object, **_kwargs: object) -> dict[str, str]:
+        destination.mkdir(parents=True)
+        (destination / ".git/lfs/objects").mkdir(parents=True)
+        (destination / "model.bin").write_text(
+            f"version https://git-lfs.github.com/spec/v1\noid sha256:{old_oid}\n"
+            f"size {len(old_payload)}\n",
+            encoding="utf-8",
+        )
+        (destination / "scales.bin").write_text(
+            f"version https://git-lfs.github.com/spec/v1\noid sha256:{new_oid}\n"
+            f"size {len(new_payload)}\n",
+            encoding="utf-8",
+        )
+        return {"GIT_LFS_SKIP_SMUDGE": "1"}
+
+    def fake_git(command: list[str], _environment: dict[str, str]) -> str:
+        commands.append(command)
+        if command[4] == "fetch":
+            assert command[5:] == ["--include=/scales.bin", "origin", "b" * 40]
+        elif command[4] == "checkout":
+            assert command[5:] == ["scales.bin"]
+            (destination / "scales.bin").write_bytes(new_payload)
+        else:
+            pytest.fail(f"unexpected Git LFS command: {command}")
+        return ""
+
+    clone_methods: list[tuple[Path, Path]] = []
+
+    def fake_clone(
+        source_path: Path,
+        destination_path: Path,
+        *,
+        expected_sha256: str | None = None,
+    ) -> str:
+        assert expected_sha256 == old_oid
+        clone_methods.append((source_path, destination_path))
+        destination_path.write_bytes(source_path.read_bytes())
+        return "reflink"
+
+    monkeypatch.setattr(provider_module, "_prepare_modelscope_git_checkout", fake_checkout)
+    monkeypatch.setattr(provider_module, "_checked_modelscope_git", fake_git)
+    monkeypatch.setattr(provider_module, "clone_artifact_file", fake_clone)
+
+    expected, fetched = asyncio.run(
+        provider_module._download_modelscope_git(
+            "owner/model",
+            "master",
+            "b" * 40,
+            destination,
+            lambda _downloaded, _total: asyncio.sleep(0),
+            "https://modelscope.test",
+            None,
+            reusable_artifact_roots=[old_root],
+        )
+    )
+
+    assert expected == {"model.bin": old_oid, "scales.bin": new_oid}
+    assert fetched == ["scales.bin"]
+    assert (destination / "model.bin").read_bytes() == old_payload
+    assert (destination / "scales.bin").read_bytes() == new_payload
+    assert [source_path for source_path, _destination_path in clone_methods] == [
+        old_root / "model.bin"
+    ]
+    assert len(commands) == 2
 
 
 def test_kaggle_latest_is_resolved_from_official_cache_path(

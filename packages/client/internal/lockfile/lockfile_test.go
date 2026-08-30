@@ -42,6 +42,22 @@ func TestRoundTripAndFind(t *testing.T) {
 	}
 }
 
+func TestFindUsesConfiguredArtifactReference(t *testing.T) {
+	wanted := File{Models: []Model{{
+		Alias: "runtime", Provider: "huggingface", ID: "owner/model", Revision: "main",
+		Artifact: "quantized-model", Files: []string{"model.gguf"},
+		ResolvedRevision: "abc", ArtifactID: "immutable-id",
+		RelativePath: "huggingface/owner/model/abc/files", LockedAt: time.Now().UTC(),
+	}}}
+	entry := Find(wanted, domain.DesiredModel{
+		Alias: "runtime", Provider: "huggingface", ID: "owner/model",
+		RequestedRevision: "main", Artifact: "quantized-model",
+	})
+	if entry == nil || entry.ArtifactID != "immutable-id" {
+		t.Fatalf("entry = %#v", entry)
+	}
+}
+
 func TestMissingVersionIsMigratedAndFutureVersionIsRejected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.lock.yml")
 	if err := os.WriteFile(path, []byte("models: []\n"), 0o600); err != nil {

@@ -334,7 +334,7 @@ a.artifact-source:hover { color:var(--green-dark); text-decoration:underline; te
 .artifact-card dl { flex:1; }
 .artifact-actions { display:grid; gap:10px; padding-top:19px; margin-top:20px; border-top:1px solid #e8ece7; }
 .artifact-command { min-width:0; display:grid; grid-template-columns:minmax(0, 1fr) auto; align-items:start; gap:8px; padding:7px 7px 7px 10px; border:1px solid #dfe5df; border-radius:9px; background:#f6f8f5; }
-.artifact-command code { min-width:0; color:#34413d; font-family:"SFMono-Regular", Consolas, monospace; font-size:10px; line-height:1.45; white-space:normal; overflow-wrap:anywhere; }
+.artifact-command code { display:block; min-width:0; overflow:hidden; color:#34413d; font-family:"SFMono-Regular", Consolas, monospace; font-size:10px; line-height:1.45; text-overflow:ellipsis; white-space:nowrap; }
 .artifact-command button { padding:6px 8px; border-radius:7px; font-size:10px; }
 .artifact-action { min-width:0; padding:9px 11px; border-radius:9px; font-size:12px; white-space:nowrap; }
 .artifact-secondary-actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }

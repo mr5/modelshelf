@@ -36,10 +36,14 @@ The default config is `~/.config/modelshelf/config.yml`; `MODELSHELF_CONFIG` ove
 `schemaVersion: 2`; v1 files migrate losslessly, while an older client refuses a future lock
 instead of silently repinning a moving revision.
 
-Optional `files` entries identify one complete GGUF variant recognized by the server. The
-equivalent CLI form repeats `--file`; split variants must include every shard. Arbitrary partial
-file sets are rejected rather than published as potentially unusable models. Auxiliary GGUF files
-such as projectors are not inferred; use the full repository when they are required.
+Optional `artifact` references one published artifact by alias (preferred) or immutable artifact
+ID. The generated lock records the resolved artifact ID and selected files, so user configuration
+and copied commands stay compact. Normal `sync` preserves that resolution; `sync --update`
+resolves the reference again.
+
+Optional `files` entries manually select source files when no published artifact reference is
+available. The equivalent CLI form repeats `--file`; split GGUF variants must include every shard.
+`artifact` and `files` are mutually exclusive.
 
 Canonical bytes live once under:
 

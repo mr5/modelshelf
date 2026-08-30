@@ -21,6 +21,7 @@ type Model struct {
 	Provider         string    `yaml:"provider"`
 	ID               string    `yaml:"id"`
 	Revision         string    `yaml:"revision"`
+	Artifact         string    `yaml:"artifact,omitempty"`
 	Path             string    `yaml:"path,omitempty"`
 	Files            []string  `yaml:"files,omitempty"`
 	ResolvedRevision string    `yaml:"resolvedRevision"`
@@ -207,6 +208,15 @@ func DesiredKey(desired domain.DesiredModel) string {
 }
 
 func Find(file File, desired domain.DesiredModel) *Model {
+	if desired.Artifact != "" {
+		for index := range file.Models {
+			candidate := &file.Models[index]
+			if candidate.Artifact == desired.Artifact && candidate.Alias == desired.Alias {
+				return candidate
+			}
+		}
+		return nil
+	}
 	key := DesiredKey(desired)
 	for index := range file.Models {
 		candidate := &file.Models[index]

@@ -277,6 +277,62 @@ models:
 	}
 }
 
+func TestAddArtifactAliasStoresCompactConfigAndLocksSelectedFiles(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/api/v1/artifacts" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`[{
+  "artifactId":"immutable-id","alias":"quantized-model","name":"model",
+  "version":"commit","provider":"huggingface","sourceId":"owner/model",
+  "requestedRevision":"main","resolvedRevision":"commit","totalSize":7,"fileCount":1,
+  "createdAt":"2026-01-01T00:00:00Z","relativePath":"huggingface/owner/model/commit/files",
+  "selectionDigest":"digest","selectedPaths":["model.gguf"]
+}]`))
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yml")
+	configuration := "serverUrl: " + server.URL + `
+nfsLocalPath: ` + filepath.Join(root, "nfs") + `
+localBasePath: ` + filepath.Join(root, "models") + `
+models: []
+`
+	if err := os.WriteFile(configPath, []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	command := NewWithIO("test", "commit", strings.NewReader(""), &output, &output)
+	command.SetArgs([]string{
+		"--config", configPath, "add", "huggingface", "owner/model", "--revision", "commit",
+		"--artifact", "quantized-model", "--alias", "runtime",
+	})
+	err := command.Execute()
+	if ExitCode(err) != ExitNotReady {
+		t.Fatalf("add exit=%d err=%v output=%s", ExitCode(err), err, output.String())
+	}
+	loaded, _, err := clientconfig.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Models) != 1 || loaded.Models[0].Artifact != "quantized-model" ||
+		loaded.Models[0].Files != nil {
+		t.Fatalf("saved models = %#v", loaded.Models)
+	}
+	locked, _, err := lockfile.Load(lockfile.Path(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := lockfile.Find(locked, loaded.Models[0])
+	if entry == nil || entry.ArtifactID != "immutable-id" || len(entry.Files) != 1 ||
+		entry.Files[0] != "model.gguf" {
+		t.Fatalf("lock entry = %#v", entry)
+	}
+}
+
 func TestSyncWritesLockBeforeLocalCopy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet || request.URL.Path != "/api/v1/artifacts" {

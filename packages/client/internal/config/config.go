@@ -147,6 +147,15 @@ func (config *Config) Validate() error {
 	seenAliases := map[string]struct{}{}
 	seenReferences := map[string]string{}
 	for index, model := range config.Models {
+		if model.Artifact != "" {
+			if strings.TrimSpace(model.Artifact) != model.Artifact ||
+				strings.ContainsAny(model.Artifact, "\r\n\t") {
+				return fmt.Errorf("models[%d].artifact is invalid", index)
+			}
+			if model.Files != nil {
+				return fmt.Errorf("models[%d] cannot define both artifact and files", index)
+			}
+		}
 		if model.Files != nil {
 			if len(model.Files) == 0 {
 				return fmt.Errorf("models[%d].files cannot be empty", index)
@@ -202,6 +211,9 @@ func (config *Config) Validate() error {
 			seenSources[sourceKey] = model.Alias != ""
 		}
 		selector := sourceKey + "@" + model.RequestedRevision + "#" + domain.SelectionDigest(model.Files)
+		if model.Artifact != "" {
+			selector = "artifact:" + model.Artifact
+		}
 		references, referenceErr := ReferencePaths(*config, model)
 		if referenceErr != nil {
 			return fmt.Errorf("models[%d]: %w", index, referenceErr)

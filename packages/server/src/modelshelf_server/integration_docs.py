@@ -284,9 +284,11 @@ models:
         "`filesystem`.",
         "- `modelshelf mount`: discover and mount the server NFS endpoint.",
         "- `modelshelf unmount`: remove the configured mount and generated Linux systemd units.",
-        "- `modelshelf add <provider> <model-id> [-r revision] [--file path] [--alias alias] "
-        "[--path path]`: add desired state and sync it. Repeat `--file` for each selected source "
-        "path; recognized GGUF variants must include every shard.",
+        "- `modelshelf add <provider> <model-id> [-r revision] [--artifact alias-or-id] "
+        "[--file path] [--alias alias] [--path path]`: add desired state and sync it. "
+        "`--artifact` uses a published artifact alias (preferred) or immutable ID and keeps "
+        "selected paths in the generated lock. Use repeated `--file` only for a manual source "
+        "selection; the two options are mutually exclusive.",
         "- `modelshelf remove <alias> [-y]`: remove desired state and symlink references. "
         "Canonical files are offered for deletion only when no lock entry references them.",
         "- `modelshelf search <query>`: search published artifacts by model name or ID.",

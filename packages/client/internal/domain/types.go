@@ -38,6 +38,7 @@ type DesiredModel struct {
 	Provider          string   `yaml:"provider" json:"provider"`
 	ID                string   `yaml:"id" json:"id"`
 	RequestedRevision string   `yaml:"revision,omitempty" json:"requestedRevision"`
+	Artifact          string   `yaml:"artifact,omitempty" json:"artifact,omitempty"`
 	ResolvedRevision  string   `yaml:"-" json:"-"`
 	ArtifactID        string   `yaml:"-" json:"-"`
 	RelativePath      string   `yaml:"-" json:"-"`
@@ -47,6 +48,7 @@ type DesiredModel struct {
 
 type ArtifactSummary struct {
 	ArtifactID        string    `json:"artifactId"`
+	Alias             string    `json:"alias,omitempty"`
 	Name              string    `json:"name"`
 	Version           string    `json:"version"`
 	Provider          string    `json:"provider"`

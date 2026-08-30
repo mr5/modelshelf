@@ -265,6 +265,28 @@ func TestSelectArtifactDistinguishesFullAndSelectedVariants(t *testing.T) {
 	}
 }
 
+func TestSelectArtifactResolvesAliasBeforeFileSelection(t *testing.T) {
+	artifacts := []domain.ArtifactSummary{
+		{
+			ArtifactID: "full", Provider: "huggingface", SourceID: "owner/model",
+			RequestedRevision: "main", ResolvedRevision: "commit",
+		},
+		{
+			ArtifactID: "partial", Alias: "quantized-model", Provider: "huggingface",
+			SourceID: "owner/model", RequestedRevision: "main", ResolvedRevision: "commit",
+			SelectionDigest: domain.SelectionDigest([]string{"model.gguf"}),
+			SelectedPaths:   []string{"model.gguf"},
+		},
+	}
+	selected := SelectArtifact(artifacts, domain.DesiredModel{
+		Provider: "huggingface", ID: "owner/model", RequestedRevision: "main",
+		Artifact: "quantized-model",
+	})
+	if selected == nil || selected.ArtifactID != "partial" {
+		t.Fatalf("artifact alias selection = %#v", selected)
+	}
+}
+
 func TestDuplicateAliasesAndCustomPathShareCanonicalArtifact(t *testing.T) {
 	root := t.TempDir()
 	nfs := filepath.Join(root, "nfs")

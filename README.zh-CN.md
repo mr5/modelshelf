@@ -177,6 +177,10 @@ models:
 其他格式无法自动推断运行时依赖，用户需要包含所有必要的权重、索引、配置、tokenizer
 及自定义代码文件。
 
+可选的 `artifact` 通过 alias（优先）或不可变 artifact ID 引用服务端已发布的制品。客户端
+会把最终解析出的 artifact ID 和所选文件写入 `config.lock.yml`，用户配置无需枚举大量
+文件。`artifact` 与 `files` 不能同时设置。
+
 `sync` 将不可变 revision 写入 `config.lock.yml`，不会修改用户的 desired-state 配置。普通
 sync 保留现有 lock；`sync --update` 更新移动的 revision；`sync --frozen-lockfile` 在需要
 修改 lock 时直接失败。Alias 是唯一引用，但多个 alias 可以共享同一份 canonical 模型。

@@ -69,6 +69,33 @@ models:
 	}
 }
 
+func TestArtifactReferenceRoundTripsWithoutSelectedFiles(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yml")
+	configuration := Config{
+		ServerURL: "http://modelshelf.test:8080", NFSLocalPath: "/mnt/modelshelf",
+		LocalBasePath: filepath.Join(root, "models"),
+		Models: []domain.DesiredModel{{
+			Alias: "runtime", Provider: domain.ProviderHuggingFace, ID: "owner/model",
+			RequestedRevision: "main", Artifact: "quantized-model",
+		}},
+	}
+	if err := Save(configuration, path); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Models[0].Artifact != "quantized-model" || reloaded.Models[0].Files != nil {
+		t.Fatalf("artifact reference = %#v", reloaded.Models[0])
+	}
+	reloaded.Models[0].Files = []string{"model.gguf"}
+	if err := reloaded.Validate(); err == nil {
+		t.Fatal("artifact reference and selected files were accepted together")
+	}
+}
+
 func TestLoadRejectsFutureConfigAndLocalLayoutSchemas(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yml")

@@ -295,6 +295,7 @@ func (application *Application) addCommand() *cobra.Command {
 	var revision string
 	var modelPath string
 	var alias string
+	var artifactReference string
 	var files []string
 	command := &cobra.Command{
 		Use:   "add <provider> <model-id>",
@@ -304,6 +305,9 @@ func (application *Application) addCommand() *cobra.Command {
 			provider, id := arguments[0], arguments[1]
 			if err := validateProvider(provider); err != nil {
 				return err
+			}
+			if artifactReference != "" && command.Flags().Changed("file") {
+				return errors.New("--artifact and --file cannot be used together")
 			}
 			if provider == domain.ProviderFilesystem && !command.Flags().Changed("revision") {
 				revision = "content"
@@ -328,12 +332,13 @@ func (application *Application) addCommand() *cobra.Command {
 			if desired == nil {
 				configuration.Models = append(configuration.Models, domain.DesiredModel{
 					Alias: alias, Provider: provider, ID: id,
-					RequestedRevision: revision, Path: modelPath, Files: files,
+					RequestedRevision: revision, Artifact: artifactReference, Path: modelPath, Files: files,
 				})
 				desired = &configuration.Models[len(configuration.Models)-1]
 			} else {
 				desired.RequestedRevision = revision
 				desired.ResolvedRevision = ""
+				desired.Artifact = artifactReference
 				desired.Files = domain.CanonicalFiles(files)
 				if modelPath != "" {
 					desired.Path = modelPath
@@ -353,6 +358,7 @@ func (application *Application) addCommand() *cobra.Command {
 					}
 					return candidate.Provider == provider && candidate.ID == id &&
 						candidate.RequestedRevision == revision &&
+						candidate.Artifact == artifactReference &&
 						domain.FilesKey(candidate.Files) == domain.FilesKey(files)
 				}, false, false)
 		},
@@ -360,6 +366,7 @@ func (application *Application) addCommand() *cobra.Command {
 	command.Flags().StringVarP(&revision, "revision", "r", "main", "requested branch, tag, or revision")
 	command.Flags().StringVar(&modelPath, "path", "", "additional symbolic-link path for this model")
 	command.Flags().StringVar(&alias, "alias", "", "optional unique local alias")
+	command.Flags().StringVar(&artifactReference, "artifact", "", "published artifact alias or ID to use")
 	command.Flags().StringArrayVar(&files, "file", nil, "file in one complete GGUF variant (repeatable)")
 	return command
 }
@@ -964,7 +971,8 @@ func (application *Application) reconcileAndSync(
 		}
 		locked := lockfile.Model{
 			Alias: desired.Alias, Provider: desired.Provider, ID: desired.ID,
-			Revision: desired.RequestedRevision, Path: desired.Path, Files: desired.Files,
+			Revision: desired.RequestedRevision, Artifact: desired.Artifact,
+			Path: desired.Path, Files: selectedFiles(desired, *artifact),
 			ResolvedRevision: artifact.ResolvedRevision, ArtifactID: artifact.ArtifactID,
 			RelativePath: artifact.RelativePath, LockedAt: lockedAt,
 		}
@@ -992,6 +1000,7 @@ func (application *Application) reconcileAndSync(
 		desired.ResolvedRevision = artifact.ResolvedRevision
 		desired.ArtifactID = artifact.ArtifactID
 		desired.RelativePath = artifact.RelativePath
+		desired.Files = selectedFiles(desired, artifact)
 		result, syncErr := syncer.SyncArtifact(ctx, configuration, desired, artifact)
 		if syncErr != nil {
 			failures++
@@ -1104,6 +1113,11 @@ func removeUnreferencedRevisionReference(
 func (application *Application) handleUnavailable(
 	ctx context.Context, client *api.Client, configuration config.Config, desired domain.DesiredModel,
 ) error {
+	if desired.Artifact != "" {
+		return &ExitError{Code: ExitUnavailable, Err: fmt.Errorf(
+			"published artifact %q is unavailable", desired.Artifact,
+		)}
+	}
 	if desired.Provider == domain.ProviderFilesystem {
 		return &ExitError{Code: ExitUnavailable, Err: errors.New(
 			"filesystem artifact is unavailable; import it with modelshelf-server import",
@@ -1172,9 +1186,20 @@ func lockMatchesConfig(locked lockfile.File, configuration config.Config) bool {
 }
 
 func lockEntryMatchesDesired(entry lockfile.Model, desired domain.DesiredModel) bool {
-	return entry.Alias == desired.Alias && entry.Provider == desired.Provider &&
+	matches := entry.Alias == desired.Alias && entry.Provider == desired.Provider &&
 		entry.ID == desired.ID && entry.Revision == desired.RequestedRevision &&
-		entry.Path == desired.Path && domain.FilesKey(entry.Files) == domain.FilesKey(desired.Files)
+		entry.Path == desired.Path
+	if desired.Artifact != "" {
+		return matches && entry.Artifact == desired.Artifact
+	}
+	return matches && domain.FilesKey(entry.Files) == domain.FilesKey(desired.Files)
+}
+
+func selectedFiles(desired domain.DesiredModel, artifact domain.ArtifactSummary) []string {
+	if desired.Artifact != "" {
+		return artifact.SelectedPaths
+	}
+	return desired.Files
 }
 
 func findDesired(configuration *config.Config, provider, id string) *domain.DesiredModel {
@@ -1309,6 +1334,9 @@ func localState(
 func manifestMatchesDesired(
 	manifest domain.ArtifactManifest, desired domain.DesiredModel,
 ) bool {
+	if desired.Artifact != "" && desired.ArtifactID != "" {
+		return manifest.ArtifactID == desired.ArtifactID
+	}
 	if manifest.Source.Provider != desired.Provider || manifest.Source.ID != desired.ID {
 		return false
 	}

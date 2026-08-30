@@ -187,6 +187,10 @@ Optional `files` entries select part of a repository. Recognized GGUF variants m
 shard; for other formats ModelShelf cannot infer runtime dependencies, so include every required
 weight, index, config, tokenizer, and custom-code file.
 
+Optional `artifact` references a published artifact by alias (preferred) or immutable ID. The
+client resolves it into the immutable artifact ID and selected paths in `config.lock.yml`, avoiding
+long file lists in user configuration. `artifact` and `files` are mutually exclusive.
+
 `sync` writes immutable resolutions to `config.lock.yml` without modifying the desired-state
 config. Normal sync preserves the lock; `sync --update` refreshes moving revisions;
 `sync --frozen-lockfile` rejects any required lock change. Aliases are unique references, but

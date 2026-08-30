@@ -80,10 +80,9 @@ function addCommand(item: ArtifactSummary): string {
     shellArgument(item.sourceId),
     "--revision",
     shellArgument(item.resolvedRevision),
+    "--artifact",
+    shellArgument(item.alias ?? item.artifactId),
   ];
-  for (const path of item.selectedPaths ?? []) {
-    command.push("--file", shellArgument(path));
-  }
   command.push(
     "--alias",
     shellArgument(artifactAlias(item)),
@@ -98,10 +97,8 @@ function modelConfig(item: ArtifactSummary): string {
     `provider: ${quote(item.provider)}`,
     `id: ${quote(item.sourceId)}`,
     `revision: ${quote(item.resolvedRevision)}`,
+    `artifact: ${quote(item.alias ?? item.artifactId)}`,
   ];
-  if (item.selectedPaths) {
-    lines.push("files:", ...item.selectedPaths.map((path) => `  - ${quote(path)}`));
-  }
   return [...lines, ""].join("\n");
 }
 

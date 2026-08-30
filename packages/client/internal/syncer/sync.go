@@ -47,6 +47,17 @@ type reusableFile struct {
 func SelectArtifact(
 	artifacts []domain.ArtifactSummary, desired domain.DesiredModel,
 ) *domain.ArtifactSummary {
+	if desired.Artifact != "" {
+		for index := range artifacts {
+			artifact := &artifacts[index]
+			if (artifact.ArtifactID == desired.Artifact || artifact.Alias == desired.Artifact) &&
+				artifact.Provider == desired.Provider &&
+				artifact.SourceID == desired.ID {
+				return artifact
+			}
+		}
+		return nil
+	}
 	var selected *domain.ArtifactSummary
 	for index := range artifacts {
 		artifact := &artifacts[index]

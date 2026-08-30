@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import modelshelf_server.tasks as task_module
 import pytest
@@ -19,7 +20,43 @@ from modelshelf_core import (
     TaskStatus,
 )
 from modelshelf_server.providers import Progress, ProviderResult
-from modelshelf_server.tasks import TaskManager
+from modelshelf_server.tasks import InsufficientStorageError, TaskManager
+
+
+def test_task_creation_reserves_remaining_transfer_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.create_with_result(
+            Provider.HUGGINGFACE,
+            "owner/first",
+            "main",
+            resolved_revision="a" * 40,
+            artifact_total_bytes=7,
+            total_bytes=7,
+            required_storage_bytes=7,
+        )
+        with pytest.raises(InsufficientStorageError, match="3 bytes available"):
+            await manager.create_with_result(
+                Provider.HUGGINGFACE,
+                "owner/second",
+                "main",
+                resolved_revision="b" * 40,
+                artifact_total_bytes=4,
+                total_bytes=4,
+                required_storage_bytes=4,
+            )
+
+    monkeypatch.setattr(
+        task_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=10, used=0, free=10),
+    )
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(
@@ -192,7 +229,7 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     loaded = manager.store.get(task_id)
     assert loaded is not None
     assert loaded.mirror_url is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 6
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 7
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 1
@@ -202,7 +239,7 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     assert migrated is not None
     assert migrated.mirror_url is None
     assert migrated.scheduled_at is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 6
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 7
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 4
@@ -214,10 +251,32 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     assert migrated.verification_bytes_completed == 0
     assert migrated.verification_detail is None
     assert migrated.artifact_alias is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 6
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 7
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
-    document["schemaVersion"] = 7
+    document["schemaVersion"] = 6
+    document["totalBytes"] = 123
+    for field in (
+        "artifactTotalBytes",
+        "reusedBytes",
+        "reusedFileCount",
+        "hardlinkBytes",
+        "hardlinkFileCount",
+        "reflinkBytes",
+        "reflinkFileCount",
+        "copyBytes",
+        "copyFileCount",
+        "reuseSourceArtifactIds",
+    ):
+        document.pop(field, None)
+    task_path.write_text(json.dumps(document), encoding="utf-8")
+    migrated = manager.store.get(task_id)
+    assert migrated is not None
+    assert migrated.artifact_total_bytes == 123
+    assert migrated.reused_bytes == 0
+
+    document = json.loads(task_path.read_text(encoding="utf-8"))
+    document["schemaVersion"] = 8
     task_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
         manager.store.list()
@@ -382,7 +441,9 @@ def test_create_reuses_existing_artifact_without_downloading(tmp_path: Path) -> 
         assert first.artifact_alias == "production-model"
         found = catalog.find(manifest.artifact_id)
         assert found is not None and found[0].alias == "production-model"
-        assert first.bytes_downloaded == manifest.total_size
+        assert first.artifact_total_bytes == manifest.total_size
+        assert first.bytes_downloaded == 0
+        assert first.reused_bytes == manifest.total_size
         assert first_result.deduplication_reason == "artifact"
         assert second.id == first.id
         assert manager.queue.empty()

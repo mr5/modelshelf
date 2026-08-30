@@ -182,17 +182,10 @@ def test_manifest_publish_and_verify(tmp_path: Path) -> None:
     assert verify_artifact(destination, full=True) == ["sha256: nested/model.gguf"]
 
 
-def test_clone_artifact_file_falls_back_to_hardlink_without_copying(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_clone_artifact_file_prefers_hardlink_without_copying(tmp_path: Path) -> None:
     source_path = tmp_path / "source.bin"
     destination = tmp_path / "nested/destination.bin"
     source_path.write_bytes(b"shared blocks")
-
-    def unsupported_reflink(*_args: object, **_kwargs: object) -> None:
-        raise OSError("reflink unavailable")
-
-    monkeypatch.setattr(catalog_module.fcntl, "ioctl", unsupported_reflink)
 
     method = catalog_module.clone_artifact_file(source_path, destination)
 

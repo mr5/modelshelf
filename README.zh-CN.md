@@ -173,14 +173,17 @@ models:
     path: runtime/qwen-2.5-7b
 ```
 
-可选的 `files` 仅用于服务端能够完整识别的 GGUF variant；分片版本必须包含全部分片，
-其他仓库类型始终完整下载。`mmproj` 等辅助 GGUF 不会被自动纳入 variant；需要这些文件时
-应完整下载仓库。
+可选的 `files` 用于选择仓库中的部分文件。已识别的 GGUF variant 必须包含全部分片；
+其他格式无法自动推断运行时依赖，用户需要包含所有必要的权重、索引、配置、tokenizer
+及自定义代码文件。
 
 `sync` 将不可变 revision 写入 `config.lock.yml`，不会修改用户的 desired-state 配置。普通
 sync 保留现有 lock；`sync --update` 更新移动的 revision；`sync --frozen-lockfile` 在需要
 修改 lock 时直接失败。Alias 是唯一引用，但多个 alias 可以共享同一份 canonical 模型。
 `path` 只创建额外软连接，不改变模型文件的实际存储位置。
+不同 revision 中 `path + size + SHA-256` 一致的文件会从本地不可变存储以 hardlink 复用；
+同一次 sync 中后处理的 revision 也可以复用本轮先完成的 revision。中断的复制会保留在
+`models/.staging/`，下次 sync 继续。
 
 ```text
 <localBasePath>/

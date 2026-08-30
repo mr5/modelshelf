@@ -81,6 +81,9 @@ async def _main(payload: dict[str, Any]) -> None:
                 "contentDisposition": result.content_disposition,
                 "expectedSha256": result.expected_sha256,
                 "fetchedPaths": result.fetched_paths,
+                "reuseStats": result.reuse_stats.as_dict()
+                if result.reuse_stats is not None
+                else None,
             },
         }
     )

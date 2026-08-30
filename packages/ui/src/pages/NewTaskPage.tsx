@@ -423,6 +423,10 @@ export function NewTaskPage() {
   const displayTransferSize = displaySize !== undefined && displayReusedSize !== undefined
     ? Math.max(0, displaySize - displayReusedSize)
     : estimate?.transferSize;
+  const availableStorage = estimate?.availableStorageBytes;
+  const storageSufficient = displayTransferSize === undefined || availableStorage === undefined
+    ? estimate?.storageSufficient
+    : displayTransferSize <= availableStorage;
   const duplicate = estimateIsCurrent && !selectFiles ? estimate?.duplicate : undefined;
   function toggleSelectedPaths(paths: string[], checked: boolean) {
     setSelectedPaths((current) => {
@@ -608,7 +612,9 @@ export function NewTaskPage() {
             <div><span>Files</span><strong>{displayFileCount === undefined ? "Unknown" : displayFileCount.toLocaleString()}</strong></div>
             {!!displayReusedSize && <div><span>Network download</span><strong>{displayTransferSize === undefined ? "Size unavailable" : formatBytes(displayTransferSize)}</strong></div>}
             {!!displayReusedSize && <div><span>Reused from shelf</span><strong>{formatBytes(displayReusedSize)}</strong></div>}
+            {availableStorage !== undefined && <div><span>Storage available</span><strong>{formatBytes(availableStorage)}</strong></div>}
           </div>
+          {storageSufficient === false && <div className="error-box">Insufficient storage for the estimated {displayTransferSize === undefined ? "download" : formatBytes(displayTransferSize)} of new data.</div>}
           {estimate.fileSelectionAvailable && (usesGgufVariants || selectableFiles.length > 0) && <section className="file-selection">
             <label className="route-option no-border">
               <input type="checkbox" checked={selectFiles} onChange={(event) => {
@@ -659,7 +665,7 @@ export function NewTaskPage() {
           ? <Link className="button existing-action" to={`/tasks/${duplicate.taskId}`}>Open existing task</Link>
           : duplicate?.kind === "artifact"
             ? <Link className="button existing-action" to="/artifacts">View artifact</Link>
-            : <button disabled={busy || !estimateIsCurrent || (selectFiles && !validSelection)}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : delayDownload ? "Schedule download" : "Start download"}</button>}
+            : <button disabled={busy || !estimateIsCurrent || storageSufficient === false || (selectFiles && !validSelection)}>{busy ? "Submitting…" : estimateLookup === "loading" ? "Validating…" : delayDownload ? "Schedule download" : "Start download"}</button>}
       </div>
     </form>
   </div>;

@@ -44,7 +44,7 @@ remains the full-content integrity audit.
 
 When another ModelScope artifact for the same source exists, ingestion matches each new LFS pointer
 against path, size, and SHA-256 entries from every earlier full or partial manifest. Matching files
-are materialized in staging with reflink, hardlink, then local-copy fallback; only unmatched LFS
+are materialized in staging with hardlink, reflink, then local-copy fallback; only unmatched LFS
 paths are fetched. Reuse is written to a temporary sibling and atomically replaces the pointer, so
 concurrent artifact deletion safely falls back to downloading. The ordinary-copy fallback hashes
 content during the copy; reflinks and hardlinks retain the trusted manifest hash without another

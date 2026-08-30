@@ -41,6 +41,9 @@ export interface DownloadEstimate {
   transferSize?: number;
   reusedSize?: number;
   reusablePaths?: string[];
+  availableStorageBytes?: number;
+  requiredStorageBytes?: number;
+  storageSufficient?: boolean;
   fileCount?: number;
   hubUrl?: string;
   metadata: EstimateMetadata[];
@@ -132,8 +135,18 @@ export interface DownloadTask {
   resolvedRevision?: string;
   status: TaskStatus;
   progress: number;
+  artifactTotalBytes?: number;
   bytesDownloaded: number;
   totalBytes?: number;
+  reusedBytes?: number;
+  reusedFileCount?: number;
+  hardlinkBytes?: number;
+  hardlinkFileCount?: number;
+  reflinkBytes?: number;
+  reflinkFileCount?: number;
+  copyBytes?: number;
+  copyFileCount?: number;
+  reuseSourceArtifactIds?: string[];
   instantaneousBytesPerSecond?: number;
   averageBytesPerSecond?: number;
   etaSeconds?: number;
@@ -201,4 +214,12 @@ export interface ArtifactManifest {
 export interface ArtifactDetail {
   summary: ArtifactSummary;
   manifest: ArtifactManifest;
+}
+
+export interface Page<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }

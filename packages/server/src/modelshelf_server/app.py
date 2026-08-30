@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import os
+import shutil
 import time
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
@@ -29,7 +30,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from modelshelf_core import Catalog, Provider, validate_artifact_alias
+from modelshelf_core import Catalog, Provider, TaskStatus, validate_artifact_alias
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from . import __version__
@@ -53,7 +54,7 @@ from .providers import (
     provider_failure_detail,
     search_models,
 )
-from .tasks import TaskManager
+from .tasks import InsufficientStorageError, TaskManager
 
 
 class LoginRequest(BaseModel):
@@ -155,6 +156,13 @@ class ReorderTasksRequest(BaseModel):
         return value
 
 
+class MoveTaskRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    target_task_id: str = Field(alias="targetTaskId", min_length=1)
+    after: bool = False
+
+
 def _selected_estimate(
     estimate: DownloadEstimate, selected_paths: list[str] | None
 ) -> tuple[list[str] | None, int | None, int | None]:
@@ -184,6 +192,39 @@ def _selected_estimate(
         else None
     )
     return normalized, total, len(normalized)
+
+
+def _reuse_estimate(
+    estimate: DownloadEstimate,
+    selected_paths: list[str] | None,
+    artifact_total_bytes: int | None,
+    manager: TaskManager,
+) -> tuple[list[str], int, int, int | None]:
+    if estimate.provider not in {Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}:
+        return [], 0, 0, artifact_total_bytes
+    selected = set(selected_paths) if selected_paths is not None else None
+    wanted = {
+        (file.path, file.sha256, file.size)
+        for file in estimate.files
+        if file.sha256 is not None
+        and file.size is not None
+        and (selected is None or file.path in selected)
+    }
+    reusable = _modelscope_reusable_files(
+        estimate.source_id,
+        manager.reusable_artifact_roots(
+            estimate.provider, estimate.source_id, estimate.resolved_revision
+        ),
+        wanted,
+    )
+    reusable_paths = sorted(path for path, _digest, _size in reusable)
+    reused_size = sum(size for _path, _digest, size in reusable)
+    transfer_size = (
+        max(0, artifact_total_bytes - reused_size)
+        if artifact_total_bytes is not None
+        else None
+    )
+    return reusable_paths, reused_size, len(reusable_paths), transfer_size
 
 
 class ConfirmHttpRequest(BaseModel):
@@ -630,6 +671,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return [item.model_dump(mode="json", by_alias=True) for item in items]
 
+    @app.get("/api/v1/artifacts/page", dependencies=[Depends(require_artifact_read)])
+    async def artifact_page(
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        provider: Provider | None = None,
+        sort_by: Annotated[Literal["created", "name", "size"], Query(alias="sortBy")] = "created",
+        sort_order: Annotated[Literal["asc", "desc"], Query(alias="sortOrder")] = "desc",
+        limit: Annotated[int, Query(ge=1, le=200)] = 48,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        items = catalog.list(
+            query=q,
+            provider=provider,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            limit=limit,
+            offset=offset,
+        )
+        total = catalog.count(query=q, provider=provider)
+        return {
+            "items": [item.model_dump(mode="json", by_alias=True) for item in items],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "hasMore": offset + len(items) < total,
+        }
+
     @app.get("/api/v1/artifacts/{artifact_id}", dependencies=[Depends(require_artifact_read)])
     async def artifact(artifact_id: str) -> dict[str, Any]:
         found = catalog.find(artifact_id)
@@ -794,30 +861,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             response["selectedPaths"] = normalized_selection
             response["totalSize"] = selected_total
             response["fileCount"] = selected_count
-        if result.provider in {Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}:
-            selected = set(normalized_selection) if normalized_selection is not None else None
-            wanted = {
-                (file.path, file.sha256, file.size)
-                for file in result.files
-                if file.sha256 is not None
-                and file.size is not None
-                and (selected is None or file.path in selected)
-            }
-            reusable = _modelscope_reusable_files(
-                result.source_id,
-                manager.reusable_artifact_roots(
-                    result.provider, result.source_id, result.resolved_revision
-                ),
-                {(path, digest, size) for path, digest, size in wanted},
-            )
-            if reusable:
-                reusable_paths = sorted(path for path, _digest, _size in reusable)
-                reused_size = sum(size for _path, _digest, size in reusable)
-                response["reusablePaths"] = reusable_paths
-                response["reusedSize"] = reused_size
-                total_size = response.get("totalSize")
-                if isinstance(total_size, int):
-                    response["transferSize"] = max(0, total_size - reused_size)
+        reusable_paths, reused_size, _reused_count, transfer_size = _reuse_estimate(
+            result, normalized_selection, selected_total, manager
+        )
+        response["reusablePaths"] = reusable_paths
+        response["reusedSize"] = reused_size
+        response["transferSize"] = transfer_size
+        storage = shutil.disk_usage(catalog.storage_root)
+        available = max(0, storage.free - manager.reserved_transfer_bytes())
+        response["availableStorageBytes"] = available
+        response["requiredStorageBytes"] = transfer_size
+        response["storageSufficient"] = (
+            transfer_size is None or transfer_size <= available
+        )
         duplicate = manager.find_duplicate(
             result.provider,
             result.source_id,
@@ -839,6 +895,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for item in manager.store.list()
         ]
 
+    @app.get("/api/v1/tasks/page", dependencies=[Depends(require_write)])
+    async def task_page(
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        provider: Provider | None = None,
+        status_filter: Annotated[str, Query(alias="statusFilter")] = "active-paused",
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        active = {
+            TaskStatus.SCHEDULED,
+            TaskStatus.QUEUED,
+            TaskStatus.RESOLVING,
+            TaskStatus.DOWNLOADING,
+            TaskStatus.VERIFYING,
+            TaskStatus.AWAITING_CONFIRMATION,
+            TaskStatus.PUBLISHING,
+        }
+        exact_status: TaskStatus | None = None
+        if status_filter not in {"active-paused", "active", "all"}:
+            try:
+                exact_status = TaskStatus(status_filter)
+            except ValueError as error:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    f"unsupported task status filter {status_filter!r}",
+                ) from error
+        needle = q.casefold().strip() if q else ""
+        filtered = []
+        for item in manager.store.list():
+            if provider is not None and item.provider is not provider:
+                continue
+            if status_filter == "active-paused":
+                if item.status not in active and item.status is not TaskStatus.PAUSED:
+                    continue
+            elif status_filter == "active":
+                if item.status not in active:
+                    continue
+            elif exact_status is not None and item.status is not exact_status:
+                continue
+            if needle and not any(
+                needle in value.casefold()
+                for value in (
+                    item.source_id,
+                    item.provider.value,
+                    item.requested_revision,
+                    item.resolved_revision or "",
+                )
+            ):
+                continue
+            filtered.append(item)
+        total = len(filtered)
+        items = filtered[offset : offset + limit]
+        return {
+            "items": [
+                item.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for item in items
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "hasMore": offset + len(items) < total,
+        }
+
     @app.post("/api/v1/tasks/reorder", dependencies=[Depends(require_write)])
     async def reorder_tasks(body: ReorderTasksRequest) -> list[dict[str, Any]]:
         try:
@@ -847,6 +966,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
         return [
             item.model_dump(mode="json", by_alias=True, exclude_none=True) for item in reordered
+        ]
+
+    @app.post("/api/v1/tasks/{task_id}/position", dependencies=[Depends(require_write)])
+    async def move_task(task_id: str, body: MoveTaskRequest) -> list[dict[str, Any]]:
+        try:
+            reordered = manager.move_queued(
+                task_id, body.target_task_id, after=body.after
+            )
+        except ValueError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        return [
+            item.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for item in reordered
         ]
 
     @app.get("/api/v1/tasks/{task_id}", dependencies=[Depends(require_write)])
@@ -938,18 +1070,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.disable_proxy,
         )
         try:
-            selected_paths, total_bytes, _selected_count = _selected_estimate(
+            selected_paths, artifact_total_bytes, _selected_count = _selected_estimate(
                 estimate, body.selected_paths
             )
         except ValueError as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        reusable_paths, reused_bytes, reused_file_count, transfer_bytes = _reuse_estimate(
+            estimate, selected_paths, artifact_total_bytes, manager
+        )
         try:
             creation = await manager.create_with_result(
                 estimate.provider,
                 estimate.source_id,
                 estimate.requested_revision,
                 resolved_revision=estimate.resolved_revision,
-                total_bytes=total_bytes,
+                artifact_total_bytes=artifact_total_bytes,
+                total_bytes=transfer_bytes,
+                reused_bytes=reused_bytes,
+                reused_file_count=reused_file_count,
+                required_storage_bytes=transfer_bytes,
                 disable_mirror=body.disable_mirror,
                 mirror_url=body.mirror_url,
                 disable_proxy=body.disable_proxy,
@@ -957,10 +1096,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selected_paths=selected_paths,
                 artifact_alias=body.artifact_alias,
             )
+        except InsufficientStorageError as error:
+            raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, str(error)) from error
         except ValueError as error:
             raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
         item = creation.task
         result = item.model_dump(mode="json", by_alias=True, exclude_none=True)
+        result["reusablePaths"] = reusable_paths
         result["deduplicated"] = creation.deduplication_reason is not None
         if creation.deduplication_reason is not None:
             result["deduplicationReason"] = creation.deduplication_reason

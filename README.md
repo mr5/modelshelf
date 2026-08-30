@@ -183,16 +183,18 @@ models:
     path: runtime/qwen-2.5-7b
 ```
 
-Optional `files` entries are reserved for a complete GGUF variant recognized by the server. Split
-variants must list every shard; other repository types are downloaded in full. Auxiliary GGUFs such
-as multimodal projectors are not inferred as part of a variant, so use the full repository when they
-are required.
+Optional `files` entries select part of a repository. Recognized GGUF variants must include every
+shard; for other formats ModelShelf cannot infer runtime dependencies, so include every required
+weight, index, config, tokenizer, and custom-code file.
 
 `sync` writes immutable resolutions to `config.lock.yml` without modifying the desired-state
 config. Normal sync preserves the lock; `sync --update` refreshes moving revisions;
 `sync --frozen-lockfile` rejects any required lock change. Aliases are unique references, but
 multiple aliases can share one canonical model copy. `path` creates another symlink and never
-changes where model bytes are stored.
+changes where model bytes are stored. Across revisions, matching `path + size + SHA-256` entries
+are hardlinked from the local immutable store; revisions processed later in the same sync can reuse
+one published earlier in that run. Interrupted copies remain in `models/.staging/` and resume on the
+next sync.
 
 ```text
 <localBasePath>/

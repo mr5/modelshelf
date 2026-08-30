@@ -190,6 +190,18 @@ def clone_artifact_file(
 ) -> str:
     """Reuse an immutable artifact file, verifying the ordinary-copy fallback inline."""
     destination.parent.mkdir(parents=True, exist_ok=True)
+
+    # Prefer hardlinks inside the artifact filesystem. They have the most
+    # straightforward POSIX accounting and deletion semantics for immutable
+    # files. Reflinks remain a fallback for filesystems that reject links but
+    # support block cloning.
+    try:
+        os.link(source, destination)
+    except OSError:
+        destination.unlink(missing_ok=True)
+    else:
+        return "hardlink"
+
     try:
         source_descriptor = os.open(source, os.O_RDONLY)
         try:
@@ -208,13 +220,6 @@ def clone_artifact_file(
         destination.unlink(missing_ok=True)
     else:
         return "reflink"
-
-    try:
-        os.link(source, destination)
-    except OSError:
-        destination.unlink(missing_ok=True)
-    else:
-        return "hardlink"
 
     try:
         digest = hashlib.sha256()
@@ -577,6 +582,16 @@ class Catalog:
                 limit=limit,
                 offset=offset,
             )
+
+    def count(
+        self, *, query: str | None = None, provider: Provider | None = None
+    ) -> int:
+        try:
+            return self.index.count(query=query, provider=provider)
+        except sqlite3.DatabaseError:
+            self.index.preserve_and_recreate()
+            self.reconcile_index()
+            return self.index.count(query=query, provider=provider)
 
     def find(self, artifact_id: str) -> tuple[ArtifactSummary, ArtifactManifest] | None:
         try:

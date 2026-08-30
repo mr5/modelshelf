@@ -15,7 +15,7 @@ import tempfile
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
@@ -42,6 +42,89 @@ class ProviderResult:
     content_disposition: str | None = None
     expected_sha256: dict[str, str] | None = None
     fetched_paths: list[str] | None = None
+    reuse_stats: ReuseStats | None = None
+
+
+@dataclass(frozen=True)
+class ReuseStats:
+    file_count: int = 0
+    bytes: int = 0
+    hardlink_file_count: int = 0
+    hardlink_bytes: int = 0
+    reflink_file_count: int = 0
+    reflink_bytes: int = 0
+    copy_file_count: int = 0
+    copy_bytes: int = 0
+    source_artifact_ids: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "fileCount": self.file_count,
+            "bytes": self.bytes,
+            "hardlinkFileCount": self.hardlink_file_count,
+            "hardlinkBytes": self.hardlink_bytes,
+            "reflinkFileCount": self.reflink_file_count,
+            "reflinkBytes": self.reflink_bytes,
+            "copyFileCount": self.copy_file_count,
+            "copyBytes": self.copy_bytes,
+            "sourceArtifactIds": list(self.source_artifact_ids),
+        }
+
+    def add(self, *, method: str, size: int, artifact_id: str) -> ReuseStats:
+        if method not in {"hardlink", "reflink", "copy"}:
+            raise ValueError(f"unsupported reuse method {method!r}")
+        return ReuseStats(
+            file_count=self.file_count + 1,
+            bytes=self.bytes + size,
+            hardlink_file_count=self.hardlink_file_count + (method == "hardlink"),
+            hardlink_bytes=self.hardlink_bytes + (size if method == "hardlink" else 0),
+            reflink_file_count=self.reflink_file_count + (method == "reflink"),
+            reflink_bytes=self.reflink_bytes + (size if method == "reflink" else 0),
+            copy_file_count=self.copy_file_count + (method == "copy"),
+            copy_bytes=self.copy_bytes + (size if method == "copy" else 0),
+            source_artifact_ids=tuple(
+                sorted({*self.source_artifact_ids, artifact_id})
+            ),
+        )
+
+    @classmethod
+    def from_dict(cls, value: object) -> ReuseStats | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("provider reuse statistics must be an object")
+        return cls(
+            file_count=int(value.get("fileCount", 0)),
+            bytes=int(value.get("bytes", 0)),
+            hardlink_file_count=int(value.get("hardlinkFileCount", 0)),
+            hardlink_bytes=int(value.get("hardlinkBytes", 0)),
+            reflink_file_count=int(value.get("reflinkFileCount", 0)),
+            reflink_bytes=int(value.get("reflinkBytes", 0)),
+            copy_file_count=int(value.get("copyFileCount", 0)),
+            copy_bytes=int(value.get("copyBytes", 0)),
+            source_artifact_ids=tuple(
+                sorted(str(item) for item in value.get("sourceArtifactIds", []))
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ReusableArtifactFile:
+    path: Path
+    artifact_id: str
+
+
+@dataclass(frozen=True)
+class ModelScopeGitResult:
+    expected_sha256: dict[str, str]
+    fetched_paths: list[str]
+    reuse_stats: ReuseStats | None = None
+
+    def __iter__(self) -> Iterator[dict[str, str] | list[str]]:
+        # Preserve the established private helper's two-value unpacking for
+        # tests and extensions while carrying optional reuse telemetry.
+        yield self.expected_sha256
+        yield self.fetched_paths
 
 
 @dataclass(frozen=True)
@@ -1338,6 +1421,7 @@ async def _isolated_download(
         fetched_paths=[str(path) for path in result["fetchedPaths"]]
         if result.get("fetchedPaths") is not None
         else None,
+        reuse_stats=ReuseStats.from_dict(result.get("reuseStats")),
     )
 
 
@@ -1497,6 +1581,7 @@ async def download_modelscope(
         )
     expected_sha256: dict[str, str] | None = None
     fetched_paths: list[str] | None = None
+    reuse_stats: ReuseStats | None = None
     if selected_paths and not reusable_artifact_roots:
         await _download_modelscope_selected(
             source_id,
@@ -1516,7 +1601,7 @@ async def download_modelscope(
                 f"expected {resolved}, got {resolved_after_download}"
             )
     else:
-        expected_sha256, fetched_paths = await _download_modelscope_git(
+        git_result = await _download_modelscope_git(
             source_id,
             revision,
             resolved,
@@ -1527,10 +1612,19 @@ async def download_modelscope(
             selected_paths=selected_paths,
             reusable_artifact_roots=reusable_artifact_roots,
         )
+        if isinstance(git_result, ModelScopeGitResult):
+            expected_sha256 = git_result.expected_sha256
+            fetched_paths = git_result.fetched_paths
+            reuse_stats = git_result.reuse_stats
+        else:  # supports tests/extensions replacing this private helper
+            expected_sha256, fetched_paths = cast(
+                tuple[dict[str, str], list[str]], git_result
+            )
     return ProviderResult(
         resolved_revision=resolved,
         expected_sha256=expected_sha256,
         fetched_paths=fetched_paths,
+        reuse_stats=reuse_stats,
     )
 
 
@@ -1578,12 +1672,13 @@ async def _download_modelscope_git(
     *,
     selected_paths: list[str] | None = None,
     reusable_artifact_roots: list[Path] | None = None,
-) -> tuple[dict[str, str], list[str]]:
+) -> ModelScopeGitResult:
     lfs_paths: set[Path] = set()
     expected_sha256: dict[str, str] = {}
     fetched_paths: list[str] = []
     incremental = bool(reusable_artifact_roots)
     transfer_total: list[int | None] = [None]
+    observed_reuse: list[ReuseStats | None] = [None]
 
     def operation() -> str:
         lfs = subprocess.run(
@@ -1642,11 +1737,17 @@ async def _download_modelscope_git(
                 continue
             temporary = path.with_name(f".{path.name}.modelshelf-reuse-{uuid4()}")
             try:
-                clone_artifact_file(reusable, temporary, expected_sha256=object_id)
+                method = clone_artifact_file(
+                    reusable.path, temporary, expected_sha256=object_id
+                )
                 os.replace(temporary, path)
             except (OSError, VerificationError):
                 temporary.unlink(missing_ok=True)
                 missing_lfs.append((relative, object_id, size))
+                continue
+            observed_reuse[0] = (observed_reuse[0] or ReuseStats()).add(
+                method=method, size=size, artifact_id=reusable.artifact_id
+            )
         fetched_paths.extend(relative.as_posix() for relative, _object_id, _size in missing_lfs)
         transfer_total[0] = regular_file_size + sum(size for _path, _object_id, size in missing_lfs)
         environment.pop("GIT_LFS_SKIP_SMUDGE", None)
@@ -1742,7 +1843,7 @@ async def _download_modelscope_git(
     )
     if incremental and transfer_total[0] is not None:
         await progress(transfer_total[0], transfer_total[0])
-    return expected_sha256, sorted(fetched_paths)
+    return ModelScopeGitResult(expected_sha256, sorted(fetched_paths), observed_reuse[0])
 
 
 def _modelscope_lfs_include(paths: list[str]) -> str | None:
@@ -1759,8 +1860,8 @@ def _modelscope_reusable_files(
     source_id: str,
     artifact_roots: list[Path],
     wanted: set[tuple[str, str, int]],
-) -> dict[tuple[str, str, int], Path]:
-    reusable: dict[tuple[str, str, int], Path] = {}
+) -> dict[tuple[str, str, int], ReusableArtifactFile]:
+    reusable: dict[tuple[str, str, int], ReusableArtifactFile] = {}
     for artifact_root in artifact_roots:
         try:
             manifest = Catalog.read_manifest(artifact_root)
@@ -1780,7 +1881,7 @@ def _modelscope_reusable_files(
                     continue
             except OSError:
                 continue
-            reusable[key] = candidate
+            reusable[key] = ReusableArtifactFile(candidate, manifest.artifact_id)
         if len(reusable) == len(wanted):
             break
     return reusable

@@ -289,6 +289,23 @@ class CatalogIndex:
         with closing(self._connect()) as connection:
             return [self._summary(row) for row in connection.execute(sql, parameters).fetchall()]
 
+    def count(
+        self, *, query: str | None = None, provider: Provider | None = None
+    ) -> int:
+        sql = "SELECT COUNT(*) FROM artifacts"
+        parameters: list[object] = []
+        conditions: list[str] = []
+        if query:
+            conditions.append("instr(search_text, ?) > 0")
+            parameters.append(query.casefold())
+        if provider is not None:
+            conditions.append("provider = ?")
+            parameters.append(provider.value)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        with closing(self._connect()) as connection:
+            return int(connection.execute(sql, parameters).fetchone()[0])
+
     def find(self, artifact_id: str) -> ArtifactSummary | None:
         with closing(self._connect()) as connection:
             row = connection.execute(

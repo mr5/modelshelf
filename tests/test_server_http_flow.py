@@ -105,6 +105,16 @@ def test_queued_and_paused_tasks_can_be_reordered_through_the_api(
             json={"orderedTaskIds": [first.id]},
             headers=headers,
         )
+        page = client.get(
+            "/api/v1/tasks/page",
+            params={"statusFilter": "active-paused", "limit": 1, "offset": 0},
+            headers=headers,
+        )
+        moved = client.post(
+            f"/api/v1/tasks/{first.id}/position",
+            json={"targetTaskId": second.id, "after": False},
+            headers=headers,
+        )
 
     assert response.status_code == 200
     assert [task["id"] for task in response.json()] == [second.id, first.id]
@@ -112,6 +122,12 @@ def test_queued_and_paused_tasks_can_be_reordered_through_the_api(
     assert [task["status"] for task in response.json()] == ["paused", "queued"]
     assert stale.status_code == 409
     assert "queue changed" in stale.json()["detail"]
+    assert page.status_code == 200
+    assert page.json()["total"] == 2
+    assert len(page.json()["items"]) == 1
+    assert page.json()["hasMore"] is True
+    assert moved.status_code == 200
+    assert [task["id"] for task in moved.json()] == [first.id, second.id]
 
 
 def test_manifest_verification_does_not_block_task_or_health_endpoints(
@@ -445,6 +461,12 @@ def test_generic_http_requires_confirmation_before_publish(tmp_path: Path) -> No
             assert confirmed.status_code == 200, confirmed.text
             assert confirmed.json()["status"] == "completed"
             [artifact_result] = client.get("/api/v1/artifacts").json()
+            artifact_page = client.get(
+                "/api/v1/artifacts/page", params={"limit": 1, "offset": 0}
+            ).json()
+            assert artifact_page["items"] == [artifact_result]
+            assert artifact_page["total"] == 1
+            assert artifact_page["hasMore"] is False
             assert client.get(
                 "/api/v1/artifacts", params={"q": "TINY-MODEL", "limit": 1, "offset": 0}
             ).json() == [artifact_result]

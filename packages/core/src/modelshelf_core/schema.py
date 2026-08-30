@@ -121,6 +121,25 @@ def _task_v5_to_v6(document: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _task_v6_to_v7(document: dict[str, Any]) -> dict[str, Any]:
+    result = dict(document)
+    # Before v7 totalBytes represented the complete artifact during preflight
+    # and was also written back over bytesDownloaded when a task completed.
+    # Preserve those historical values while separating the artifact size for
+    # all new progress updates.
+    result.setdefault("artifactTotalBytes", result.get("totalBytes"))
+    result.setdefault("reusedBytes", 0)
+    result.setdefault("reusedFileCount", 0)
+    result.setdefault("hardlinkBytes", 0)
+    result.setdefault("hardlinkFileCount", 0)
+    result.setdefault("reflinkBytes", 0)
+    result.setdefault("reflinkFileCount", 0)
+    result.setdefault("copyBytes", 0)
+    result.setdefault("copyFileCount", 0)
+    result.setdefault("reuseSourceArtifactIds", [])
+    return result
+
+
 def _manifest_v1_to_v2(document: dict[str, Any]) -> dict[str, Any]:
     result = dict(document)
     source = dict(result.get("source") or {})
@@ -141,6 +160,7 @@ def load_task_json(raw: str) -> tuple[DownloadTask, bool]:
             3: _task_v3_to_v4,
             4: _task_v4_to_v5,
             5: _task_v5_to_v6,
+            6: _task_v6_to_v7,
         },
         missing_version=0,
     )

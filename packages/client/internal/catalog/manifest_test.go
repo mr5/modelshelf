@@ -79,6 +79,20 @@ func TestValidateManifestRejectsFutureSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestVerifyAcceptsSelectedArtifactIdentity(t *testing.T) {
+	root := t.TempDir()
+	modelPath := filepath.Join(root, "model.gguf")
+	if err := os.WriteFile(modelPath, []byte("weights"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	digest, _ := SHA256File(modelPath)
+	manifest := validManifest([]domain.FileEntry{{Path: "model.gguf", Size: 7, SHA256: digest}})
+	manifest.Source.SelectedPaths = []string{"model.gguf"}
+	manifest.ArtifactID += ":files:" + domain.SelectionDigest(manifest.Source.SelectedPaths)
+	writeManifest(t, root, manifest)
+	assertNoFailures(t, root, VerifyOptions{Full: true})
+}
+
 func TestVerifyRejectsExpectedSymlink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")

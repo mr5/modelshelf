@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MANIFEST_SCHEMA_VERSION: Literal[2] = 2
-TASK_SCHEMA_VERSION: Literal[6] = 6
+TASK_SCHEMA_VERSION: Literal[7] = 7
 STORAGE_LAYOUT_SCHEMA_VERSION: Literal[2] = 2
 ARTIFACT_ALIASES_SCHEMA_VERSION: Literal[1] = 1
 
@@ -168,7 +168,7 @@ class InferredMetadata(Model):
 
 
 class DownloadTask(Model):
-    schema_version: Literal[6]
+    schema_version: Literal[7]
     id: str
     provider: Provider
     source_id: str
@@ -184,8 +184,18 @@ class DownloadTask(Model):
     resolved_revision: str | None = None
     status: TaskStatus
     progress: int = Field(ge=0, le=100)
+    artifact_total_bytes: int | None = Field(default=None, ge=0)
     bytes_downloaded: int = Field(default=0, ge=0)
     total_bytes: int | None = Field(default=None, ge=0)
+    reused_bytes: int = Field(default=0, ge=0)
+    reused_file_count: int = Field(default=0, ge=0)
+    hardlink_bytes: int = Field(default=0, ge=0)
+    hardlink_file_count: int = Field(default=0, ge=0)
+    reflink_bytes: int = Field(default=0, ge=0)
+    reflink_file_count: int = Field(default=0, ge=0)
+    copy_bytes: int = Field(default=0, ge=0)
+    copy_file_count: int = Field(default=0, ge=0)
+    reuse_source_artifact_ids: list[str] = Field(default_factory=list)
     instantaneous_bytes_per_second: float = Field(default=0, ge=0)
     average_bytes_per_second: float = Field(default=0, ge=0)
     eta_seconds: int | None = Field(default=None, ge=0)

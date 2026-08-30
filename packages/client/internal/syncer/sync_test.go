@@ -2,12 +2,15 @@ package syncer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -93,6 +96,126 @@ func TestNativeSyncReconcilesAndAtomicallyReplaces(t *testing.T) {
 	assertSyncedContent(t, firstDestination, "first", first.ArtifactID)
 	if entries, err := os.ReadDir(filepath.Join(local, "models", ".staging")); err != nil || len(entries) != 0 {
 		t.Fatalf("staging was not cleaned: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestSyncReusesFilesFromExistingLocalRevision(t *testing.T) {
+	root := t.TempDir()
+	nfs := filepath.Join(root, "nfs")
+	local := filepath.Join(root, "local")
+	first := createArtifactFiles(t, nfs, "commit-one", map[string]string{
+		"shared.bin": "unchanged", "version.txt": "one",
+	}, time.Now().Add(-time.Hour))
+	second := createArtifactFiles(t, nfs, "commit-two", map[string]string{
+		"shared.bin": "unchanged", "version.txt": "two",
+	}, time.Now())
+	configuration := config.Config{NFSLocalPath: nfs, LocalBasePath: local}
+	desired := domain.DesiredModel{
+		Provider: domain.ProviderHuggingFace, ID: "owner/model", RequestedRevision: "main",
+	}
+	if _, err := SyncArtifact(context.Background(), configuration, desired, first); err != nil {
+		t.Fatal(err)
+	}
+	firstRoot, _ := config.ArtifactPath(configuration, first.RelativePath)
+	firstShared, err := os.Stat(filepath.Join(firstRoot, "shared.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SyncArtifact(context.Background(), configuration, desired, second); err != nil {
+		t.Fatal(err)
+	}
+	secondRoot, _ := config.ArtifactPath(configuration, second.RelativePath)
+	secondShared, err := os.Stat(filepath.Join(secondRoot, "shared.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(firstShared, secondShared) {
+		t.Fatal("unchanged file was not hardlinked from the existing local revision")
+	}
+}
+
+func TestSyncBatchReusesRevisionPublishedEarlierInSameRun(t *testing.T) {
+	root := t.TempDir()
+	nfs := filepath.Join(root, "nfs")
+	configuration := config.Config{NFSLocalPath: nfs, LocalBasePath: filepath.Join(root, "local")}
+	artifacts := []domain.ArtifactSummary{
+		createArtifactFiles(t, nfs, "commit-one", map[string]string{"shared.bin": "same"}, time.Now()),
+		createArtifactFiles(t, nfs, "commit-two", map[string]string{"shared.bin": "same"}, time.Now()),
+	}
+	for _, artifact := range artifacts {
+		desired := domain.DesiredModel{
+			Provider: domain.ProviderHuggingFace, ID: "owner/model",
+			RequestedRevision: artifact.ResolvedRevision,
+		}
+		if _, err := SyncArtifact(context.Background(), configuration, desired, artifact); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstRoot, _ := config.ArtifactPath(configuration, artifacts[0].RelativePath)
+	secondRoot, _ := config.ArtifactPath(configuration, artifacts[1].RelativePath)
+	first, _ := os.Stat(filepath.Join(firstRoot, "shared.bin"))
+	second, _ := os.Stat(filepath.Join(secondRoot, "shared.bin"))
+	if first == nil || second == nil || !os.SameFile(first, second) {
+		t.Fatal("second revision in one sync run did not reuse the first revision")
+	}
+	if err := RemoveTree(firstRoot); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := os.Stat(filepath.Join(secondRoot, "shared.bin"))
+	if err != nil {
+		t.Fatal("deleting one revision removed the shared file from another revision")
+	}
+	if remaining.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("deleting one revision made the shared inode writable: %o", remaining.Mode().Perm())
+	}
+}
+
+func TestSyncRetainsCompletedStagingFilesAfterFailure(t *testing.T) {
+	root := t.TempDir()
+	nfs := filepath.Join(root, "nfs")
+	configuration := config.Config{NFSLocalPath: nfs, LocalBasePath: filepath.Join(root, "local")}
+	artifact := createArtifactFiles(t, nfs, "commit", map[string]string{
+		"first.bin": "first", "second.bin": "second",
+	}, time.Now())
+	source := filepath.Join(nfs, filepath.FromSlash(artifact.RelativePath))
+	manifest, err := catalog.ReadManifest(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(artifact.ArtifactID))
+	stage := filepath.Join(config.StagingRoot(configuration), fmt.Sprintf("sync-%x", digest[:]))
+	state := stagingState{SchemaVersion: 1, ArtifactID: artifact.ArtifactID, ContentSHA256: manifest.ContentSHA256}
+	if err := prepareStaging(stage, state); err != nil {
+		t.Fatal(err)
+	}
+	stagedFirst := filepath.Join(stage, "first.bin")
+	data, _ := os.ReadFile(filepath.Join(source, "first.bin"))
+	if err := os.WriteFile(stagedFirst, data, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	secondSource := filepath.Join(source, "second.bin")
+	secondData, _ := os.ReadFile(secondSource)
+	if err := os.Remove(secondSource); err != nil {
+		t.Fatal(err)
+	}
+	desired := domain.DesiredModel{Provider: domain.ProviderHuggingFace, ID: "owner/model", RequestedRevision: "main"}
+	if _, err := SyncArtifact(context.Background(), configuration, desired, artifact); err == nil {
+		t.Fatal("sync unexpectedly succeeded with a missing NFS file")
+	}
+	before, err := os.Stat(stagedFirst)
+	if err != nil {
+		t.Fatal("completed staged file was removed after failure")
+	}
+	if err := os.WriteFile(secondSource, secondData, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SyncArtifact(context.Background(), configuration, desired, artifact); err != nil {
+		t.Fatal(err)
+	}
+	destination, _ := config.ArtifactPath(configuration, artifact.RelativePath)
+	after, err := os.Stat(filepath.Join(destination, "first.bin"))
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("completed staged file was recopied instead of resumed")
 	}
 }
 
@@ -271,6 +394,60 @@ func createArtifact(
 		ArtifactID: artifactID, Name: "model", Version: revision, Provider: source.Provider,
 		SourceID: source.ID, RequestedRevision: "main", ResolvedRevision: revision,
 		TotalSize: int64(len(content)), FileCount: 1, CreatedAt: created,
+		RelativePath: filepath.ToSlash(relative),
+	}
+}
+
+func createArtifactFiles(
+	t *testing.T, nfs, revision string, contents map[string]string, created time.Time,
+) domain.ArtifactSummary {
+	t.Helper()
+	relative := filepath.Join("huggingface", "owner", "model", revision)
+	root := filepath.Join(nfs, relative)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := make([]domain.FileEntry, 0, len(contents))
+	var total int64
+	for path, content := range contents {
+		candidate := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(candidate), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(candidate, []byte(content), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		digest, err := catalog.SHA256File(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		size := int64(len(content))
+		total += size
+		files = append(files, domain.FileEntry{Path: path, Size: size, SHA256: digest})
+	}
+	sort.Slice(files, func(left, right int) bool { return files[left].Path < files[right].Path })
+	source := domain.SourceReference{
+		Provider: "huggingface", ID: "owner/model", RequestedRevision: "main", ResolvedRevision: revision,
+	}
+	artifactID := source.Provider + ":" + base64.RawURLEncoding.EncodeToString([]byte(source.ID)) + ":" +
+		base64.RawURLEncoding.EncodeToString([]byte(revision))
+	manifest := domain.ArtifactManifest{
+		SchemaVersion: 1, ArtifactID: artifactID, Name: "model", Version: revision,
+		Source: source, ContentSHA256: catalog.ContentDigest(files), CreatedAt: created,
+		TotalSize: total, FileCount: len(files), Files: files,
+	}
+	metadata := filepath.Join(root, ".modelshelf")
+	if err := os.Mkdir(metadata, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(metadata, "manifest.json"), data, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	return domain.ArtifactSummary{
+		ArtifactID: artifactID, Name: "model", Version: revision, Provider: source.Provider,
+		SourceID: source.ID, RequestedRevision: "main", ResolvedRevision: revision,
+		TotalSize: total, FileCount: len(files), CreatedAt: created,
 		RelativePath: filepath.ToSlash(relative),
 	}
 }

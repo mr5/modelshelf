@@ -1,23 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { DragEvent } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, formatDuration, formatRate } from "../api.ts";
+import { api, formatBytes, formatDuration, formatRate } from "../api.ts";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
 import { taskStepProgress } from "../taskProgress.ts";
-import type { DownloadTask, Provider, ServerInfo, TaskStatus } from "../types.ts";
+import type { DownloadTask, Page, Provider, ServerInfo, TaskStatus } from "../types.ts";
 import { TaskPage } from "./TaskPage.tsx";
 
 const terminalStatuses = new Set<TaskStatus>(["completed", "failed", "cancelled"]);
 const sortableQueueStatuses = new Set<TaskStatus>(["queued", "paused"]);
-const activeStatuses = new Set<TaskStatus>([
-  "scheduled",
-  "queued",
-  "resolving",
-  "downloading",
-  "verifying",
-  "awaiting_confirmation",
-  "publishing",
-]);
+const pageSize = 50;
 
 const providers: Array<{ value: Provider; label: string }> = [
   { value: "huggingface", label: "Hugging Face Hub" },
@@ -40,6 +32,8 @@ export function TasksPage() {
   const [query, setQuery] = useState("");
   const [provider, setProvider] = useState<Provider | "">("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("active-paused");
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
   const [deletingTaskId, setDeletingTaskId] = useState<string>();
   const [draggedTaskId, setDraggedTaskId] = useState<string>();
   const [dropTarget, setDropTarget] = useState<{ id: string; after: boolean }>();
@@ -54,9 +48,17 @@ export function TasksPage() {
       });
     async function load() {
       try {
-        const result = await api<DownloadTask[]>("/tasks");
+        const parameters = new URLSearchParams({
+          limit: String(pageSize),
+          offset: String(offset),
+          statusFilter,
+        });
+        if (query.trim()) parameters.set("q", query.trim());
+        if (provider) parameters.set("provider", provider);
+        const result = await api<Page<DownloadTask>>(`/tasks/page?${parameters.toString()}`);
         if (active) {
-          setTasks(result);
+          setTasks(result.items);
+          setTotal(result.total);
           setTasksError("");
         }
       } catch (cause) {
@@ -66,42 +68,7 @@ export function TasksPage() {
     void load();
     const timer = window.setInterval(() => void load(), 1500);
     return () => { active = false; window.clearInterval(timer); };
-  }, []);
-
-  const filteredTasks = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    const filtered = tasks.filter((task) => {
-      if (provider && task.provider !== provider) return false;
-      if (statusFilter === "active-paused") {
-        if (!activeStatuses.has(task.status) && task.status !== "paused") return false;
-      } else if (statusFilter === "active") {
-        if (!activeStatuses.has(task.status)) return false;
-      } else if (statusFilter !== "all" && task.status !== statusFilter) {
-        return false;
-      }
-      if (!needle) return true;
-      return [task.sourceId, task.provider, task.requestedRevision, task.resolvedRevision ?? ""]
-        .some((value) => value.toLocaleLowerCase().includes(needle));
-    });
-    const queued = filtered
-      .filter((task) => sortableQueueStatuses.has(task.status))
-      .sort((left, right) =>
-        (left.queuePosition ?? Number.MAX_SAFE_INTEGER)
-        - (right.queuePosition ?? Number.MAX_SAFE_INTEGER)
-        || left.createdAt.localeCompare(right.createdAt));
-    let queuedIndex = 0;
-    return filtered.map((task) => sortableQueueStatuses.has(task.status) ? queued[queuedIndex++]! : task);
-  }, [provider, query, statusFilter, tasks]);
-
-  const queueRanks = useMemo(() => new Map(
-    tasks
-      .filter((task) => sortableQueueStatuses.has(task.status))
-      .sort((left, right) =>
-        (left.queuePosition ?? Number.MAX_SAFE_INTEGER)
-        - (right.queuePosition ?? Number.MAX_SAFE_INTEGER)
-        || left.createdAt.localeCompare(right.createdAt))
-      .map((task, index) => [task.id, index + 1]),
-  ), [tasks]);
+  }, [offset, provider, query, statusFilter]);
 
   async function deleteTask(task: DownloadTask, deleteArtifact: boolean): Promise<boolean> {
     setDeletingTaskId(task.id);
@@ -110,6 +77,7 @@ export function TasksPage() {
       const query = deleteArtifact ? "?deleteArtifact=true" : "";
       await api<void>(`/tasks/${task.id}${query}`, { method: "DELETE" });
       setTasks((current) => current.filter((item) => item.id !== task.id));
+      setTotal((current) => Math.max(0, current - 1));
       return true;
     } catch (cause) {
       setTasksError(cause instanceof Error ? cause.message : String(cause));
@@ -121,6 +89,7 @@ export function TasksPage() {
 
   function taskDeleted(taskId: string) {
     setTasks((current) => current.filter((item) => item.id !== taskId));
+    setTotal((current) => Math.max(0, current - 1));
   }
 
   function beginQueueDrag(event: DragEvent<HTMLButtonElement>, taskId: string) {
@@ -148,33 +117,17 @@ export function TasksPage() {
         || left.createdAt.localeCompare(right.createdAt));
     const draggedIndex = queued.findIndex((task) => task.id === draggedTaskId);
     if (draggedIndex < 0 || !queued.some((task) => task.id === targetId)) return;
-    const [dragged] = queued.splice(draggedIndex, 1);
-    if (!dragged) return;
-    let targetIndex = queued.findIndex((task) => task.id === targetId);
-    if (after) targetIndex += 1;
-    queued.splice(targetIndex, 0, dragged);
-    const orderedTaskIds = queued.map((task) => task.id);
-    const optimisticPositions = new Map(orderedTaskIds.map((id, index) => [id, index]));
-
     setReorderingQueue(true);
     setQueueError("");
-    setTasks((current) => current.map((task) => sortableQueueStatuses.has(task.status)
-      ? { ...task, queuePosition: optimisticPositions.get(task.id) }
-      : task));
     try {
-      const reordered = await api<DownloadTask[]>("/tasks/reorder", {
+      const reordered = await api<DownloadTask[]>(`/tasks/${draggedTaskId}/position`, {
         method: "POST",
-        body: JSON.stringify({ orderedTaskIds }),
+        body: JSON.stringify({ targetTaskId: targetId, after }),
       });
       const saved = new Map(reordered.map((task) => [task.id, task]));
       setTasks((current) => current.map((task) => saved.get(task.id) ?? task));
     } catch (cause) {
       setQueueError(cause instanceof Error ? cause.message : String(cause));
-      try {
-        setTasks(await api<DownloadTask[]>("/tasks"));
-      } catch {
-        // Keep the actionable reorder error visible; normal polling will retry the refresh.
-      }
     } finally {
       setReorderingQueue(false);
       setDraggedTaskId(undefined);
@@ -192,12 +145,12 @@ export function TasksPage() {
       {tasksError && <div className="error-box">Could not refresh downloads: {tasksError}</div>}
       {queueError && <div className="error-box">Could not reorder downloads: {queueError}</div>}
       <div className="task-filters">
-        <input className="search" aria-label="Search downloads" placeholder="Search model ID or revision…" value={query} onChange={(event) => setQuery(event.target.value)} />
-        <label><span>Source</span><select value={provider} onChange={(event) => setProvider(event.target.value as Provider | "")}>
+        <input className="search" aria-label="Search downloads" placeholder="Search model ID or revision…" value={query} onChange={(event) => { setQuery(event.target.value); setOffset(0); }} />
+        <label><span>Source</span><select value={provider} onChange={(event) => { setProvider(event.target.value as Provider | ""); setOffset(0); }}>
           <option value="">All sources</option>
           {providers.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
         </select></label>
-        <label><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
+        <label><span>Status</span><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as StatusFilter); setOffset(0); }}>
           <option value="active-paused">Active &amp; paused</option>
           <option value="all">All statuses</option>
           <option value="active">Active (all in-progress phases)</option>
@@ -218,7 +171,7 @@ export function TasksPage() {
         <table className="tasks-table">
           <colgroup><col className="queue-column" /><col className="source-column" /><col className="status-column" /><col className="revision-column" /><col className="progress-column" /><col className="updated-column" /><col className="actions-column" /></colgroup>
           <thead><tr><th>Queue</th><th>Source</th><th>Status</th><th>Revision</th><th>Progress</th><th>Updated</th><th><span className="sr-only">Actions</span></th></tr></thead>
-          <tbody>{filteredTasks.map((task) => <tr
+          <tbody>{tasks.map((task) => <tr
             key={task.id}
             className={[
               draggedTaskId === task.id ? "queue-row-dragging" : "",
@@ -237,12 +190,12 @@ export function TasksPage() {
                 className="queue-drag-handle"
                 draggable={!reorderingQueue}
                 disabled={reorderingQueue}
-                aria-label={`Drag ${task.sourceId}, priority ${queueRanks.get(task.id) ?? "unknown"}`}
+                aria-label={`Drag ${task.sourceId}, priority ${(task.queuePosition ?? -1) + 1}`}
                 title={task.status === "paused" ? "Drag to set priority when resumed" : "Drag to change download priority"}
                 onDragStart={(event) => beginQueueDrag(event, task.id)}
                 onDragEnd={() => { setDraggedTaskId(undefined); setDropTarget(undefined); }}
               >⠿</button>
-              <span>#{queueRanks.get(task.id)}</span>
+              <span>#{(task.queuePosition ?? -1) + 1}</span>
             </div>}</td>
             <td><Link className="row-title" to={`/tasks/${task.id}`}>{task.sourceId}</Link><span className="subline">{task.provider}</span></td>
             <td className="task-status-cell">
@@ -263,7 +216,7 @@ export function TasksPage() {
               title={`Delete ${task.status} task?`}
               description={task.status === "completed"
                 ? (deleteArtifact) => deleteArtifact
-                  ? "The task record, retained staging data, published artifact manifest and all model files will be permanently removed."
+                  ? `The task record and published artifact will be removed. Artifact logical size: ${formatBytes(task.artifactTotalBytes ?? 0)}. Shared hardlinks can make the physical space released smaller.`
                   : "The task record and any retained staging data will be removed. Its published artifact and model files will remain on the shelf."
                 : "The task record and any downloaded staging data will be permanently removed."}
               optionLabel={task.status === "completed" ? "Also delete the published artifact and model files" : undefined}
@@ -273,9 +226,13 @@ export function TasksPage() {
             />}</td>
           </tr>)}</tbody>
         </table>
-        {tasks.length === 0 && <div className="empty"><h2>The shelf is quiet</h2><p>Create a download to ingest the first immutable artifact.</p></div>}
-        {tasks.length > 0 && filteredTasks.length === 0 && <div className="empty"><h2>No matching downloads</h2><p>Change the keyword, source or status filters to see other tasks.</p></div>}
+        {total === 0 && <div className="empty"><h2>No matching downloads</h2><p>Change the keyword, source or status filters, or create a new download.</p></div>}
       </section>
+      {total > pageSize && <div className="load-more">
+        <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>Previous</button>
+        <span>{offset + 1}–{Math.min(offset + tasks.length, total)} of {total}</span>
+        <button type="button" disabled={offset + tasks.length >= total} onClick={() => setOffset(offset + pageSize)}>Next</button>
+      </div>}
       {selectedTaskId && <TaskPage taskId={selectedTaskId} onDeleted={taskDeleted} />}
     </div>
   );

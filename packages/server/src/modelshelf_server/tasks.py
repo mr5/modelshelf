@@ -30,7 +30,7 @@ from modelshelf_core.identity import artifact_identity
 from modelshelf_core.schema import load_task_json
 
 from .archive import extract_archive, infer_metadata
-from .providers import ProviderResult, provider_failure_detail, run_provider
+from .providers import ProviderResult, ReuseStats, provider_failure_detail, run_provider
 
 _PROVIDER_RESULT_SCHEMA_VERSION = 1
 _VERIFICATION_WORKERS = 2
@@ -59,6 +59,16 @@ class TaskCreationResult:
     deduplication_reason: Literal["artifact", "task"] | None = None
 
 
+class InsufficientStorageError(ValueError):
+    def __init__(self, required: int, available: int) -> None:
+        self.required = required
+        self.available = available
+        super().__init__(
+            "insufficient storage for this download: "
+            f"requires at least {required} bytes, {available} bytes available"
+        )
+
+
 class TaskStore:
     def __init__(self, jobs_root: Path) -> None:
         self.jobs_root = jobs_root
@@ -76,6 +86,9 @@ class TaskStore:
         total_bytes: int | None,
         disable_mirror: bool,
         disable_proxy: bool,
+        artifact_total_bytes: int | None = None,
+        reused_bytes: int = 0,
+        reused_file_count: int = 0,
         mirror_url: str | None = None,
         scheduled_at: datetime | None = None,
         queue_position: int | None = None,
@@ -108,7 +121,12 @@ class TaskStore:
             artifact_alias=artifact_alias,
             status=initial_status,
             progress=0,
+            artifact_total_bytes=(
+                artifact_total_bytes if artifact_total_bytes is not None else total_bytes
+            ),
             total_bytes=total_bytes,
+            reused_bytes=reused_bytes,
+            reused_file_count=reused_file_count,
             created_at=now,
             updated_at=now,
         )
@@ -145,8 +163,10 @@ class TaskStore:
             artifact_alias=artifact_alias,
             status=TaskStatus.COMPLETED,
             progress=100,
-            bytes_downloaded=total_bytes,
-            total_bytes=total_bytes,
+            artifact_total_bytes=total_bytes,
+            bytes_downloaded=0,
+            total_bytes=0,
+            reused_bytes=total_bytes,
             eta_seconds=0,
             artifact_id=artifact_id,
             created_at=now,
@@ -274,6 +294,20 @@ class TaskManager:
             for summary in self.catalog.list(provider=provider)
             if summary.source_id == source_id and summary.resolved_revision != resolved_revision
         ]
+
+    def reserved_transfer_bytes(self) -> int:
+        reserving = {
+            TaskStatus.SCHEDULED,
+            TaskStatus.QUEUED,
+            TaskStatus.RESOLVING,
+            TaskStatus.DOWNLOADING,
+            TaskStatus.PAUSED,
+        }
+        return sum(
+            max(0, task.total_bytes - task.bytes_downloaded)
+            for task in self.store.list()
+            if task.status in reserving and task.total_bytes is not None
+        )
 
     @staticmethod
     def _queue_order(task: DownloadTask) -> tuple[int, datetime]:
@@ -614,7 +648,11 @@ class TaskManager:
         requested_revision: str,
         *,
         resolved_revision: str | None = None,
+        artifact_total_bytes: int | None = None,
         total_bytes: int | None = None,
+        reused_bytes: int = 0,
+        reused_file_count: int = 0,
+        required_storage_bytes: int | None = None,
         disable_mirror: bool = False,
         mirror_url: str | None = None,
         disable_proxy: bool = False,
@@ -689,13 +727,24 @@ class TaskManager:
                     )
                     return TaskCreationResult(updated, duplicate.kind)
 
+            if required_storage_bytes is not None:
+                available = max(
+                    0,
+                    shutil.disk_usage(self.catalog.storage_root).free
+                    - self.reserved_transfer_bytes(),
+                )
+                if required_storage_bytes > available:
+                    raise InsufficientStorageError(required_storage_bytes, available)
             self._ensure_alias_available(artifact_alias)
             task = self.store.create(
                 provider,
                 source_id,
                 requested_revision,
                 resolved_revision=resolved_revision,
+                artifact_total_bytes=artifact_total_bytes,
                 total_bytes=total_bytes,
+                reused_bytes=reused_bytes,
+                reused_file_count=reused_file_count,
                 disable_mirror=disable_mirror,
                 mirror_url=mirror_url,
                 disable_proxy=disable_proxy,
@@ -718,7 +767,11 @@ class TaskManager:
         requested_revision: str,
         *,
         resolved_revision: str | None = None,
+        artifact_total_bytes: int | None = None,
         total_bytes: int | None = None,
+        reused_bytes: int = 0,
+        reused_file_count: int = 0,
+        required_storage_bytes: int | None = None,
         disable_mirror: bool = False,
         mirror_url: str | None = None,
         disable_proxy: bool = False,
@@ -732,7 +785,11 @@ class TaskManager:
                 source_id,
                 requested_revision,
                 resolved_revision=resolved_revision,
+                artifact_total_bytes=artifact_total_bytes,
                 total_bytes=total_bytes,
+                reused_bytes=reused_bytes,
+                reused_file_count=reused_file_count,
+                required_storage_bytes=required_storage_bytes,
                 disable_mirror=disable_mirror,
                 mirror_url=mirror_url,
                 disable_proxy=disable_proxy,
@@ -790,6 +847,28 @@ class TaskManager:
             )
         self._scheduler_wakeup.set()
         return reordered
+
+    def move_queued(
+        self, task_id: str, target_task_id: str, *, after: bool
+    ) -> list[DownloadTask]:
+        pending = sorted(
+            (
+                task
+                for task in self.store.list()
+                if task.status in {TaskStatus.QUEUED, TaskStatus.PAUSED}
+            ),
+            key=self._queue_order,
+        )
+        pending_by_id = {task.id: task for task in pending}
+        if task_id not in pending_by_id or target_task_id not in pending_by_id:
+            raise ValueError("download queue changed; refresh the task list and try again")
+        moving = pending_by_id[task_id]
+        pending = [task for task in pending if task.id != task_id]
+        target_index = next(
+            index for index, task in enumerate(pending) if task.id == target_task_id
+        )
+        pending.insert(target_index + (1 if after else 0), moving)
+        return self.reorder_queued([task.id for task in pending])
 
     async def _update(self, task_id: str, **values: Any) -> DownloadTask:
         async with self._update_lock:
@@ -1124,6 +1203,9 @@ class TaskManager:
                 "contentDisposition": result.content_disposition,
                 "expectedSha256": result.expected_sha256,
                 "fetchedPaths": result.fetched_paths,
+                "reuseStats": result.reuse_stats.as_dict()
+                if result.reuse_stats is not None
+                else None,
             },
         )
 
@@ -1151,6 +1233,7 @@ class TaskManager:
             if expected is not None
             else None,
             fetched_paths=[str(path) for path in fetched] if fetched is not None else None,
+            reuse_stats=ReuseStats.from_dict(value.get("reuseStats")),
         )
 
     def _save_verified_inventory(self, stage: Path, files: list[FileEntry]) -> None:
@@ -1247,6 +1330,20 @@ class TaskManager:
                     "provider returned a different resolved revision than the validated preflight"
                 )
             self._save_provider_result(stage, result)
+            if result.reuse_stats is not None:
+                reuse = result.reuse_stats
+                await self._update(
+                    task_id,
+                    reused_bytes=reuse.bytes,
+                    reused_file_count=reuse.file_count,
+                    hardlink_bytes=reuse.hardlink_bytes,
+                    hardlink_file_count=reuse.hardlink_file_count,
+                    reflink_bytes=reuse.reflink_bytes,
+                    reflink_file_count=reuse.reflink_file_count,
+                    copy_bytes=reuse.copy_bytes,
+                    copy_file_count=reuse.copy_file_count,
+                    reuse_source_artifact_ids=list(reuse.source_artifact_ids),
+                )
             await self._stop_metrics(task_id, clear_eta=True)
             files = self._load_verified_inventory(stage) if resume_from_stage else None
             if files is None:
@@ -1273,7 +1370,9 @@ class TaskManager:
                     instantaneous_bytes_per_second=0,
                     eta_seconds=None,
                     verification_bytes_completed=0,
-                    verification_total_bytes=None if trusted_sha256 else task.total_bytes,
+                    verification_total_bytes=(
+                        None if trusted_sha256 else task.artifact_total_bytes
+                    ),
                     verification_instantaneous_bytes_per_second=0,
                     verification_average_bytes_per_second=0,
                     verification_eta_seconds=None,
@@ -1329,10 +1428,13 @@ class TaskManager:
                         + "; ".join(details)
                     )
             downloaded_size = sum(file.size for file in files)
-            if task.total_bytes is not None and downloaded_size != task.total_bytes:
+            if (
+                task.artifact_total_bytes is not None
+                and downloaded_size != task.artifact_total_bytes
+            ):
                 raise RuntimeError(
                     "downloaded content size does not match the validated preflight: "
-                    f"expected {task.total_bytes} bytes, got {downloaded_size}"
+                    f"expected {task.artifact_total_bytes} bytes, got {downloaded_size}"
                 )
             digest = content_digest(files)
             resolved_revision = result.resolved_revision or f"sha256:{digest}"
@@ -1389,8 +1491,7 @@ class TaskManager:
                 status=TaskStatus.COMPLETED,
                 progress=100,
                 artifact_id=manifest.artifact_id,
-                bytes_downloaded=manifest.total_size,
-                total_bytes=manifest.total_size,
+                artifact_total_bytes=manifest.total_size,
                 instantaneous_bytes_per_second=0,
                 eta_seconds=0,
                 verification_instantaneous_bytes_per_second=0,

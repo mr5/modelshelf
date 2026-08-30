@@ -6,7 +6,7 @@ import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
 import { ArtifactFileTree } from "../components/ArtifactFileTree.tsx";
 import { selectionSummary } from "../selection.ts";
 import { sourceModelUrl } from "../source.ts";
-import type { ArtifactDetail, ArtifactSummary, Provider } from "../types.ts";
+import type { ArtifactDetail, ArtifactSummary, Page, Provider } from "../types.ts";
 
 const pageSize = 48;
 
@@ -48,14 +48,14 @@ function SourceLogo({ provider }: { provider: Provider }) {
 function artifactsPath(query: string, provider: Provider | "", sort: SortOption, offset: number) {
   const [sortBy, sortOrder] = sort.split(":") as ["created" | "name" | "size", "asc" | "desc"];
   const parameters = new URLSearchParams({
-    limit: String(pageSize + 1),
+    limit: String(pageSize),
     offset: String(offset),
     sortBy,
     sortOrder,
   });
   if (query) parameters.set("q", query);
   if (provider) parameters.set("provider", provider);
-  return `/artifacts?${parameters.toString()}`;
+  return `/artifacts/page?${parameters.toString()}`;
 }
 
 function artifactAlias(item: ArtifactSummary): string {
@@ -127,11 +127,11 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
     const timer = window.setTimeout(() => {
       setLoading(true);
       setError("");
-      void api<ArtifactSummary[]>(artifactsPath(query, provider, sort, 0))
+      void api<Page<ArtifactSummary>>(artifactsPath(query, provider, sort, 0))
         .then((result) => {
           if (!active) return;
-          setItems(result.slice(0, pageSize));
-          setHasMore(result.length > pageSize);
+          setItems(result.items);
+          setHasMore(result.hasMore);
         })
         .catch((cause) => {
           if (active) setError(cause instanceof Error ? cause.message : String(cause));
@@ -184,9 +184,9 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
     setLoading(true);
     setError("");
     try {
-      const result = await api<ArtifactSummary[]>(artifactsPath(query, provider, sort, items.length));
-      setItems((current) => [...current, ...result.slice(0, pageSize)]);
-      setHasMore(result.length > pageSize);
+      const result = await api<Page<ArtifactSummary>>(artifactsPath(query, provider, sort, items.length));
+      setItems((current) => [...current, ...result.items]);
+      setHasMore(result.hasMore);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -269,7 +269,7 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
           triggerLabel="Delete artifact"
           triggerClassName="danger-text artifact-delete-menu-item"
           title={`Delete ${item.name}?`}
-          description={`Its manifest and all ${item.fileCount.toLocaleString()} files (${formatBytes(item.totalSize)}) will be permanently removed from the shelf.`}
+          description={`Its manifest and all ${item.fileCount.toLocaleString()} files will be permanently removed. Logical size: ${formatBytes(item.totalSize)}. Because immutable files may be hardlinked across artifacts, the physical space released can be smaller.`}
           confirmLabel="Delete artifact"
           disabled={deletingArtifactId === item.artifactId}
           onConfirm={() => deleteArtifact(item)}

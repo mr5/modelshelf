@@ -1,6 +1,6 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, formatDuration, formatRate } from "../api.ts";
+import { api, formatBytes, formatDuration, formatRate } from "../api.ts";
 import { ArtifactFileTree } from "../components/ArtifactFileTree.tsx";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
 import { ResumeControl } from "../components/ResumeControl.tsx";
@@ -178,7 +178,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
         title={`Delete ${task.status} task?`}
         description={task.status === "completed"
           ? (deleteArtifact) => deleteArtifact
-            ? "The task record, retained staging data, published artifact manifest and all model files will be permanently removed."
+            ? `The task record and published artifact will be removed. Artifact logical size: ${formatBytes(task.artifactTotalBytes ?? 0)}. Shared hardlinks can make the physical space released smaller.`
             : "The task record and any retained staging data will be removed. Its published artifact and model files will remain on the shelf."
           : "The task record and any downloaded staging data will be permanently removed."}
         optionLabel={task.status === "completed" ? "Also delete the published artifact and model files" : undefined}
@@ -210,6 +210,12 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       <Detail label="Requested revision" value={task.requestedRevision} mono />
       <Detail label="Resolved revision" value={task.resolvedRevision ?? "Pending resolution"} mono />
       {task.artifactAlias && <Detail label="Artifact alias" value={task.artifactAlias} />}
+      {task.artifactTotalBytes !== undefined && <Detail label="Artifact logical size" value={formatBytes(task.artifactTotalBytes)} />}
+      {task.totalBytes !== undefined && <Detail label="Network transfer" value={`${formatBytes(task.bytesDownloaded)} / ${formatBytes(task.totalBytes)}`} />}
+      {!!task.reusedBytes && <Detail label="Reused from shelf" value={`${formatBytes(task.reusedBytes)} · ${(task.reusedFileCount ?? 0).toLocaleString()} files`} />}
+      {!!task.hardlinkBytes && <Detail label="Hardlink reuse" value={`${formatBytes(task.hardlinkBytes)} · ${(task.hardlinkFileCount ?? 0).toLocaleString()} files`} />}
+      {!!task.reflinkBytes && <Detail label="Reflink fallback" value={`${formatBytes(task.reflinkBytes)} · ${(task.reflinkFileCount ?? 0).toLocaleString()} files`} />}
+      {!!task.copyBytes && <Detail label="Local copy fallback" value={`${formatBytes(task.copyBytes)} · ${(task.copyFileCount ?? 0).toLocaleString()} files`} />}
       <Detail label="Created" value={new Date(task.createdAt).toLocaleString()} />
       {task.status === "scheduled" && task.scheduledAt && <Detail label="Scheduled start" value={new Date(task.scheduledAt).toLocaleString()} />}
       <Detail label="Network route" value={route} />

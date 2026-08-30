@@ -177,6 +177,9 @@ func Verify(root string, options VerifyOptions) ([]string, error) {
 	}
 	expectedID := manifest.Source.Provider + ":" + encodeSegment(manifest.Source.ID) + ":" +
 		encodeSegment(manifest.Source.ResolvedRevision)
+	if selectionDigest := domain.SelectionDigest(manifest.Source.SelectedPaths); selectionDigest != "" {
+		expectedID += ":files:" + selectionDigest
+	}
 	if manifest.ArtifactID != expectedID {
 		failures = append(failures, "manifest artifactId does not match source identity")
 	}

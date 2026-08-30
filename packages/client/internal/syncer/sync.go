@@ -2,6 +2,8 @@ package syncer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,17 @@ type copyJob struct {
 	source      string
 	destination string
 	mode        os.FileMode
+	expectedSHA string
+}
+
+type stagingState struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	ArtifactID    string `json:"artifactId"`
+	ContentSHA256 string `json:"contentSha256"`
+}
+
+type reusableFile struct {
+	path string
 }
 
 func SelectArtifact(
@@ -124,26 +137,38 @@ func SyncArtifact(
 	if err := os.MkdirAll(stagingParent, 0o755); err != nil {
 		return domain.ArtifactSummary{}, fmt.Errorf("create staging directory: %w", err)
 	}
-	staging, err := os.MkdirTemp(stagingParent, "sync-*")
+	manifest, err := catalog.ReadManifest(source)
 	if err != nil {
-		return domain.ArtifactSummary{}, fmt.Errorf("create staging tree: %w", err)
+		return domain.ArtifactSummary{}, err
 	}
-	defer RemoveTree(staging)
-	directories, err := copyTree(ctx, source, staging)
+	if manifest.ArtifactID != artifact.ArtifactID {
+		return domain.ArtifactSummary{}, fmt.Errorf(
+			"NFS manifest identity mismatch: got %s, expected %s",
+			manifest.ArtifactID, artifact.ArtifactID,
+		)
+	}
+	stageDigest := sha256.Sum256([]byte(artifact.ArtifactID))
+	staging := filepath.Join(stagingParent, fmt.Sprintf("sync-%x", stageDigest[:]))
+	state := stagingState{
+		SchemaVersion: 1, ArtifactID: artifact.ArtifactID, ContentSHA256: manifest.ContentSHA256,
+	}
+	if err := prepareStaging(staging, state); err != nil {
+		return domain.ArtifactSummary{}, err
+	}
+	reusable, err := reusableLocalFiles(configuration, manifest)
 	if err != nil {
+		return domain.ArtifactSummary{}, err
+	}
+	directories, err := materializeManifest(ctx, source, staging, manifest, reusable)
+	if err != nil {
+		// Completed files are intentionally retained for the next sync attempt.
 		return domain.ArtifactSummary{}, err
 	}
 	metadataDirectory := filepath.Join(staging, ".modelshelf")
 	if err := os.Chmod(metadataDirectory, 0o755); err != nil {
 		return domain.ArtifactSummary{}, fmt.Errorf("make metadata directory writable: %w", err)
 	}
-	syncState := map[string]any{
-		"schemaVersion": 1,
-		"artifactId":    artifact.ArtifactID,
-		"serverUrl":     configuration.ServerURL,
-		"syncedAt":      time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	if err := writeAtomicJSON(filepath.Join(metadataDirectory, "sync.json"), syncState); err != nil {
+	if err := copyManifest(source, staging); err != nil {
 		return domain.ArtifactSummary{}, err
 	}
 	failures, err := catalog.Verify(staging, catalog.VerifyOptions{})
@@ -155,6 +180,19 @@ func SyncArtifact(
 			"quick verification failed: %s", strings.Join(failures, "; "),
 		)
 	}
+	syncState := map[string]any{
+		"schemaVersion": 1,
+		"artifactId":    artifact.ArtifactID,
+		"serverUrl":     configuration.ServerURL,
+		"syncedAt":      time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := writeAtomicJSON(filepath.Join(metadataDirectory, "sync.json"), syncState); err != nil {
+		return domain.ArtifactSummary{}, err
+	}
+	if err := os.Remove(filepath.Join(metadataDirectory, "staging.json")); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		return domain.ArtifactSummary{}, fmt.Errorf("remove staging state: %w", err)
+	}
 	freezeDirectories(staging, directories)
 	if err := AtomicPublish(staging, destination); err != nil {
 		return domain.ArtifactSummary{}, err
@@ -163,6 +201,145 @@ func SyncArtifact(
 		return domain.ArtifactSummary{}, err
 	}
 	return artifact, nil
+}
+
+func prepareStaging(staging string, wanted stagingState) error {
+	statePath := filepath.Join(staging, ".modelshelf", "staging.json")
+	data, err := os.ReadFile(statePath)
+	if err == nil {
+		var current stagingState
+		if json.Unmarshal(data, &current) == nil && current == wanted {
+			return nil
+		}
+		if err := RemoveTree(staging); err != nil {
+			return fmt.Errorf("reset incompatible staging tree: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read staging state: %w", err)
+	} else if _, statErr := os.Lstat(staging); statErr == nil {
+		if err := RemoveTree(staging); err != nil {
+			return fmt.Errorf("reset unrecognized staging tree: %w", err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(staging, ".modelshelf"), 0o755); err != nil {
+		return fmt.Errorf("create staging metadata: %w", err)
+	}
+	if err := writeAtomicJSON(statePath, wanted); err != nil {
+		return fmt.Errorf("write staging state: %w", err)
+	}
+	return nil
+}
+
+func reusableKey(entry domain.FileEntry) string {
+	return entry.Path + "\x00" + fmt.Sprint(entry.Size) + "\x00" + entry.SHA256
+}
+
+func reusableLocalFiles(
+	configuration config.Config, wanted domain.ArtifactManifest,
+) (map[string]reusableFile, error) {
+	result := map[string]reusableFile{}
+	wantedKeys := make(map[string]struct{}, len(wanted.Files))
+	for _, file := range wanted.Files {
+		wantedKeys[reusableKey(file)] = struct{}{}
+	}
+	store := config.ArtifactStoreRoot(configuration)
+	err := filepath.WalkDir(store, func(candidate string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if entry.IsDir() && candidate == config.StagingRoot(configuration) {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() || filepath.Base(candidate) != "manifest.json" ||
+			filepath.Base(filepath.Dir(candidate)) != ".modelshelf" {
+			return nil
+		}
+		root := filepath.Dir(filepath.Dir(candidate))
+		manifest, err := catalog.ReadManifest(root)
+		if err != nil || manifest.ArtifactID == wanted.ArtifactID ||
+			manifest.Source.Provider != wanted.Source.Provider || manifest.Source.ID != wanted.Source.ID {
+			return nil
+		}
+		for _, file := range manifest.Files {
+			key := reusableKey(file)
+			if _, needed := wantedKeys[key]; !needed {
+				continue
+			}
+			if _, exists := result[key]; exists {
+				continue
+			}
+			path := filepath.Join(root, filepath.FromSlash(file.Path))
+			info, statErr := os.Lstat(path)
+			if statErr == nil && info.Mode().IsRegular() && info.Size() == file.Size {
+				result[key] = reusableFile{path: path}
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("scan local artifacts for reusable files: %w", err)
+	}
+	return result, nil
+}
+
+func materializeManifest(
+	ctx context.Context,
+	source string,
+	destination string,
+	manifest domain.ArtifactManifest,
+	reusable map[string]reusableFile,
+) ([]directoryMode, error) {
+	directories := []directoryMode{}
+	jobs := []copyJob{}
+	seenDirectories := map[string]struct{}{}
+	for _, entry := range manifest.Files {
+		target := filepath.Join(destination, filepath.FromSlash(entry.Path))
+		parent := filepath.Dir(target)
+		if _, seen := seenDirectories[parent]; !seen {
+			if err := os.MkdirAll(parent, 0o755); err != nil {
+				return nil, fmt.Errorf("create staging directory: %w", err)
+			}
+			seenDirectories[parent] = struct{}{}
+			directories = append(directories, directoryMode{path: parent, mode: 0o755})
+		}
+		if info, err := os.Lstat(target); err == nil && info.Mode().IsRegular() &&
+			info.Size() == entry.Size {
+			continue
+		} else if err == nil || !errors.Is(err, os.ErrNotExist) {
+			_ = os.Remove(target)
+		}
+		if candidate, ok := reusable[reusableKey(entry)]; ok {
+			if err := os.Link(candidate.path, target); err == nil {
+				continue
+			}
+			_ = os.Remove(target)
+		}
+		info, err := os.Stat(filepath.Join(source, filepath.FromSlash(entry.Path)))
+		if err != nil {
+			return nil, fmt.Errorf("inspect NFS file %s: %w", entry.Path, err)
+		}
+		jobs = append(jobs, copyJob{
+			source:      filepath.Join(source, filepath.FromSlash(entry.Path)),
+			destination: target,
+			mode:        info.Mode().Perm(),
+			expectedSHA: entry.SHA256,
+		})
+	}
+	if err := runCopyJobs(ctx, jobs); err != nil {
+		return nil, err
+	}
+	return directories, nil
+}
+
+func copyManifest(source, destination string) error {
+	sourcePath := filepath.Join(source, filepath.FromSlash(catalog.ManifestPath))
+	targetPath := filepath.Join(destination, filepath.FromSlash(catalog.ManifestPath))
+	_ = os.Remove(targetPath)
+	return copyFile(copyJob{source: sourcePath, destination: targetPath, mode: 0o444},
+		make([]byte, 4*1024*1024))
 }
 
 func EnsureReferences(configuration config.Config, desired domain.DesiredModel, artifactPath string) error {
@@ -350,6 +527,13 @@ func copyTree(ctx context.Context, source, destination string) ([]directoryMode,
 	if err != nil {
 		return nil, fmt.Errorf("scan NFS artifact: %w", err)
 	}
+	if err := runCopyJobs(ctx, jobs); err != nil {
+		return nil, err
+	}
+	return directories, nil
+}
+
+func runCopyJobs(ctx context.Context, jobs []copyJob) error {
 	workerCount := min(max(runtime.NumCPU(), 1), 8)
 	jobChannel := make(chan copyJob)
 	workerContext, cancel := context.WithCancel(ctx)
@@ -386,12 +570,12 @@ sendLoop:
 	close(jobChannel)
 	waitGroup.Wait()
 	if firstError != nil {
-		return nil, firstError
+		return firstError
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	return directories, nil
+	return nil
 }
 
 func copyFile(job copyJob, buffer []byte) error {
@@ -400,19 +584,29 @@ func copyFile(job copyJob, buffer []byte) error {
 		return fmt.Errorf("open source %s: %w", job.source, err)
 	}
 	defer source.Close()
-	destination, err := os.OpenFile(job.destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	temporaryPath := job.destination + ".modelshelf-part"
+	_ = os.Remove(temporaryPath)
+	destination, err := os.OpenFile(temporaryPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("create destination %s: %w", job.destination, err)
+		return fmt.Errorf("create temporary destination %s: %w", temporaryPath, err)
 	}
 	succeeded := false
 	defer func() {
 		destination.Close()
 		if !succeeded {
-			os.Remove(job.destination)
+			os.Remove(temporaryPath)
 		}
 	}()
-	if _, err := io.CopyBuffer(destination, source, buffer); err != nil {
+	digest := sha256.New()
+	writer := io.Writer(destination)
+	if job.expectedSHA != "" {
+		writer = io.MultiWriter(destination, digest)
+	}
+	if _, err := io.CopyBuffer(writer, source, buffer); err != nil {
 		return fmt.Errorf("copy %s: %w", job.source, err)
+	}
+	if job.expectedSHA != "" && hex.EncodeToString(digest.Sum(nil)) != job.expectedSHA {
+		return fmt.Errorf("copy %s: SHA-256 does not match manifest", job.source)
 	}
 	if err := destination.Sync(); err != nil {
 		return fmt.Errorf("sync %s: %w", job.destination, err)
@@ -420,8 +614,11 @@ func copyFile(job copyJob, buffer []byte) error {
 	if err := destination.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(job.destination, job.mode); err != nil {
+	if err := os.Chmod(temporaryPath, job.mode); err != nil {
 		return err
+	}
+	if err := os.Rename(temporaryPath, job.destination); err != nil {
+		return fmt.Errorf("publish copied file %s: %w", job.destination, err)
 	}
 	succeeded = true
 	return nil
@@ -496,8 +693,6 @@ func RemoveTree(root string) error {
 		if entry.IsDir() {
 			_ = os.Chmod(candidate, 0o700)
 			directories = append(directories, candidate)
-		} else if entry.Type()&os.ModeSymlink == 0 {
-			_ = os.Chmod(candidate, 0o600)
 		}
 		return nil
 	})

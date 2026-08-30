@@ -193,7 +193,8 @@ button.file-tree-toggle:hover { background:#e5ece7; color:var(--ink); }
 .button.existing-action { background:white; color:#594b20; border:1px solid #d9c681; }
 .button.existing-action:hover { background:#fbf4dc; color:#493c15; }
 .actions { display:flex; justify-content:flex-end; gap:10px; }
-.load-more { display:flex; justify-content:center; padding:22px 0 4px; }
+.load-more { display:flex; align-items:center; justify-content:center; gap:12px; padding:22px 0 4px; }
+.load-more span { color:var(--muted); font-size:13px; }
 .integration-page { scroll-behavior:smooth; }
 .integration-agent-link { align-self:flex-end; }
 .integration-loading { padding:24px; color:var(--muted); }

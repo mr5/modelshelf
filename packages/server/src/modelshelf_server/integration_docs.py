@@ -263,8 +263,11 @@ models:
         "`localBasePath`. A branch or tag such as `main` is a sibling symlink to its locked "
         "immutable revision.",
         _fence("text", local_layout),
-        "The internal `models/.staging/` directory is temporary and is never a model "
-        "reference path.",
+        "The internal `models/.staging/` directory holds resumable sync work and is never a "
+        "model reference path. Completed syncs remove their staging tree.",
+        "> **Cross-revision reuse:** matching path, size, and SHA-256 entries are hardlinked "
+        "from an existing local immutable revision. Revisions processed later in one sync can "
+        "reuse revisions published earlier in the same run.",
         "> **References do not duplicate model bytes.** Multiple aliases may declare the same "
         "exact model and share one immutable directory. Requested-revision, alias, and path "
         "entries are symlinks only; `sync --update` atomically moves branch or tag links.",

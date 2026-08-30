@@ -669,7 +669,7 @@ def test_modelscope_git_download_defers_lfs_integrity_to_manifest_hashing(
     monkeypatch.setattr(provider_module, "_prepare_modelscope_git_checkout", fake_checkout)
     monkeypatch.setattr(provider_module, "_checked_modelscope_git", fake_git)
 
-    expected, fetched = asyncio.run(
+    git_result = asyncio.run(
         provider_module._download_modelscope_git(
             "owner/model",
             "master",
@@ -680,6 +680,7 @@ def test_modelscope_git_download_defers_lfs_integrity_to_manifest_hashing(
             None,
         )
     )
+    expected, fetched = git_result
 
     assert expected == {"model.bin": oid}
     assert fetched == ["model.bin"]
@@ -764,7 +765,7 @@ def test_modelscope_git_download_reuses_matching_lfs_files_from_any_prior_select
     monkeypatch.setattr(provider_module, "_checked_modelscope_git", fake_git)
     monkeypatch.setattr(provider_module, "clone_artifact_file", fake_clone)
 
-    expected, fetched = asyncio.run(
+    git_result = asyncio.run(
         provider_module._download_modelscope_git(
             "owner/model",
             "master",
@@ -776,6 +777,7 @@ def test_modelscope_git_download_reuses_matching_lfs_files_from_any_prior_select
             reusable_artifact_roots=[old_root],
         )
     )
+    expected, fetched = git_result
 
     assert expected == {"model.bin": old_oid, "scales.bin": new_oid}
     assert fetched == ["scales.bin"]
@@ -785,6 +787,10 @@ def test_modelscope_git_download_reuses_matching_lfs_files_from_any_prior_select
         old_root / "model.bin"
     ]
     assert len(commands) == 2
+    assert git_result.reuse_stats is not None
+    assert git_result.reuse_stats.reflink_file_count == 1
+    assert git_result.reuse_stats.reflink_bytes == len(old_payload)
+    assert git_result.reuse_stats.source_artifact_ids == (old_manifest.artifact_id,)
 
 
 def test_kaggle_latest_is_resolved_from_official_cache_path(

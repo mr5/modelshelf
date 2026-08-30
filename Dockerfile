@@ -1,3 +1,5 @@
+ARG MODELSHELF_VERSION=0.1.0-beta.20
+
 FROM node:24-bookworm-slim AS ui
 WORKDIR /src
 RUN corepack enable
@@ -8,7 +10,7 @@ COPY packages/ui packages/ui
 RUN pnpm --filter @modelshelf/ui build
 
 FROM golang:1.25-bookworm AS client
-ARG MODELSHELF_VERSION=0.1.0-beta.20
+ARG MODELSHELF_VERSION
 ARG MODELSHELF_COMMIT=unknown
 WORKDIR /src
 COPY packages/client/go.mod packages/client/go.sum packages/client/
@@ -21,8 +23,10 @@ RUN OUTPUT_DIR=/out \
     sh scripts/package_client.sh
 
 FROM python:3.12-slim AS runtime
+ARG MODELSHELF_VERSION
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    MODELSHELF_VERSION=$MODELSHELF_VERSION \
     MODELSHELF_STORAGE_ROOT=/data \
     MODELSHELF_UI_DIST=/app/ui \
     MODELSHELF_CLIENT_DIST=/app/client \

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from importlib.metadata import PackageNotFoundError, version
 
@@ -11,7 +12,10 @@ def _display_version(distribution_version: str) -> str:
     return distribution_version
 
 
-try:
-    __version__ = _display_version(version("modelshelf-server"))
-except PackageNotFoundError:
-    __version__ = "dev"
+if build_version := os.getenv("MODELSHELF_VERSION"):
+    __version__ = build_version
+else:
+    try:
+        __version__ = _display_version(version("modelshelf-server"))
+    except PackageNotFoundError:
+        __version__ = "dev"

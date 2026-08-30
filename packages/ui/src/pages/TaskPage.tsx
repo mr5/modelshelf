@@ -1,8 +1,10 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, formatDuration, formatRate } from "../api.ts";
+import { ArtifactFileTree } from "../components/ArtifactFileTree.tsx";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
 import { ResumeControl } from "../components/ResumeControl.tsx";
+import { ScheduleControl } from "../components/ScheduleControl.tsx";
 import { sourceModelUrl } from "../source.ts";
 import { taskStepProgress, taskSteps, type TaskStepView } from "../taskProgress.ts";
 import type { DownloadTask } from "../types.ts";
@@ -80,6 +82,23 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
     }
   }
 
+  async function reschedule(scheduledAt: string): Promise<boolean> {
+    setActionBusy(true);
+    setError("");
+    try {
+      setTask(await api<DownloadTask>(`/tasks/${taskId}/schedule`, {
+        method: "PUT",
+        body: JSON.stringify({ scheduledAt }),
+      }));
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   async function deleteTask(deleteArtifact: boolean): Promise<boolean> {
     if (!task) return false;
     setActionBusy(true);
@@ -140,6 +159,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
     onClose={close}
     footer={(canCancel || canDelete) && <>
       {canPause && <button className="ghost" disabled={actionBusy} onClick={() => void control("pause")}>Pause</button>}
+      {task.status === "scheduled" && task.scheduledAt && <ScheduleControl scheduledAt={task.scheduledAt} disabled={actionBusy} onSave={reschedule} />}
       {task.status === "scheduled" && <button disabled={actionBusy} onClick={() => void control("start")}>Start now</button>}
       {task.status === "paused" && <ResumeControl disabled={actionBusy} onResume={resume} />}
       {canCancel && <DeleteConfirm
@@ -195,10 +215,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       <Detail label="Network route" value={route} />
     </section>
 
-    {task.selectedPaths && <details className="task-selected-files">
-      <summary>Selected source files <span>{task.selectedPaths.length.toLocaleString()}</span></summary>
-      <div>{task.selectedPaths.map((path) => <code key={path}>{path}</code>)}</div>
-    </details>}
+    {task.selectedPaths && <ArtifactFileTree title="Selected source files" files={task.selectedPaths.map((path) => ({ path }))} />}
 
     {task.error && <div className="error-box">{task.error}</div>}
     {error && <div className="error-box">{error}</div>}

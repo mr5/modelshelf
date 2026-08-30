@@ -388,6 +388,22 @@ class TaskManager:
         self._scheduler_wakeup.set()
         return queued
 
+    async def reschedule(self, task_id: str, scheduled_at: datetime) -> DownloadTask:
+        if scheduled_at.tzinfo is None or scheduled_at.utcoffset() is None:
+            raise ValueError("scheduled start must include a timezone")
+        scheduled_at = scheduled_at.astimezone(UTC)
+        if scheduled_at <= datetime.now(UTC):
+            raise ValueError("scheduled start must be in the future")
+        rescheduled = await self._transition(
+            task_id,
+            {TaskStatus.SCHEDULED},
+            "rescheduled",
+            scheduled_at=scheduled_at,
+            queue_position=None,
+        )
+        self._arm_scheduled_task(rescheduled)
+        return rescheduled
+
     async def pause(self, task_id: str) -> DownloadTask:
         current = self.store.get(task_id)
         queue_position = (

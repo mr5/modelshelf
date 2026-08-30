@@ -736,6 +736,63 @@ def test_scheduled_task_can_start_immediately(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+def test_scheduled_task_can_replace_its_start_time(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            task = await manager.create(
+                Provider.HUGGINGFACE,
+                "owner/model",
+                "main",
+                resolved_revision="8" * 40,
+                scheduled_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+            previous_waiter = manager._scheduled_runs[task.id]
+            replacement = datetime.now(UTC) + timedelta(hours=2)
+
+            updated = await manager.reschedule(task.id, replacement)
+
+            assert updated.status is TaskStatus.SCHEDULED
+            assert updated.scheduled_at == replacement
+            assert manager._scheduled_runs[task.id] is not previous_waiter
+            await asyncio.sleep(0)
+            assert previous_waiter.cancelled()
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
+def test_scheduled_task_rejects_a_past_replacement_time(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            original = datetime.now(UTC) + timedelta(hours=1)
+            task = await manager.create(
+                Provider.HUGGINGFACE,
+                "owner/model",
+                "main",
+                resolved_revision="8" * 40,
+                scheduled_at=original,
+            )
+            with pytest.raises(ValueError, match="scheduled start must be in the future"):
+                await manager.reschedule(task.id, datetime.now(UTC) - timedelta(seconds=1))
+            unchanged = manager.store.get(task.id)
+            assert unchanged is not None and unchanged.scheduled_at == original
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+
+
 def test_delayed_resume_preserves_staging_data_across_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

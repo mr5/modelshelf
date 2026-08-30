@@ -39,6 +39,7 @@ from .client_distribution import (
     render_installer,
 )
 from .config import Settings
+from .integration_docs import render_integration_markdown
 from .providers import (
     DownloadEstimate,
     ModelSearch,
@@ -503,12 +504,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "installUrl": _external_url(settings, request, "/install.sh"),
                 "downloadUrl": _external_url(settings, request, "/api/v1/client"),
             },
+            "documentation": {
+                "humanUrl": _external_url(settings, request, "/integration"),
+                "agentUrl": _external_url(settings, request, "/integration.md"),
+            },
             "network": {
                 "mirrors": mirrors,
                 "proxyConfigured": settings.http_proxy is not None,
                 "proxyDisplay": proxy_display,
             },
         }
+
+    @app.get("/integration.md", include_in_schema=False)
+    async def integration_markdown(request: Request) -> PlainTextResponse:
+        return PlainTextResponse(
+            render_integration_markdown(settings, str(request.base_url)),
+            media_type="text/markdown",
+            headers={
+                "Cache-Control": "no-cache",
+                "Content-Disposition": 'inline; filename="modelshelf-integration.md"',
+            },
+        )
 
     @app.get("/install.sh", include_in_schema=False)
     async def client_installer(request: Request) -> PlainTextResponse:

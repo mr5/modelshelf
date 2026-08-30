@@ -295,6 +295,38 @@ def test_artifacts_are_public_by_default_and_can_require_authentication(tmp_path
         assert client.get("/api/v1/artifacts").status_code == 200
 
 
+def test_integration_markdown_is_public_and_uses_deployment_metadata(tmp_path: Path) -> None:
+    settings = Settings(
+        storage_root=tmp_path / "storage",
+        nfs_advertised_host="models.internal",
+        nfs_port=2049,
+        nfs_advertised_port=12049,
+        public_base_url="https://models.example.test",
+        public_artifacts=False,
+        admin_password_hash=PasswordHasher().hash("secret"),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/integration.md")
+        info = client.get("/api/v1/info").json()
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert response.headers["content-disposition"] == (
+        'inline; filename="modelshelf-integration.md"'
+    )
+    assert "# ModelShelf integration" in response.text
+    assert "```bash" in response.text
+    assert "```yaml" in response.text
+    assert "models.internal:12049" in response.text
+    assert "https://models.example.test/integration.md" in response.text
+    assert "<html" not in response.text.lower()
+    assert info["documentation"] == {
+        "humanUrl": "https://models.example.test/integration",
+        "agentUrl": "https://models.example.test/integration.md",
+    }
+
+
 def test_generic_http_requires_confirmation_before_publish(tmp_path: Path) -> None:
     served = tmp_path / "served"
     served.mkdir()

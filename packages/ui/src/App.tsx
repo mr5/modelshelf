@@ -1,12 +1,16 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { api } from "./api.ts";
 import { ArtifactsPage } from "./pages/ArtifactsPage.tsx";
-import { IntegrationPage } from "./pages/IntegrationPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { NewTaskPage } from "./pages/NewTaskPage.tsx";
 import { TasksPage } from "./pages/TasksPage.tsx";
 import type { ServerInfo } from "./types.ts";
+
+const IntegrationPage = lazy(async () => {
+  const module = await import("./pages/IntegrationPage.tsx");
+  return { default: module.IntegrationPage };
+});
 
 export function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
@@ -40,7 +44,7 @@ export function App() {
       <Route path="/login" element={<LoginPage onLogin={() => setAuthenticated(true)} />} />
       <Route element={<Shell authenticated={authenticated} publicArtifacts={publicArtifacts} onLogout={() => setAuthenticated(false)} />}>
         <Route index element={<Navigate to={defaultPath} replace />} />
-        <Route path="/integration" element={<IntegrationPage />} />
+        <Route path="/integration" element={<Suspense fallback={<div className="boot">Loading integration guide…</div>}><IntegrationPage /></Suspense>} />
         <Route path="/artifacts" element={<ArtifactAccess authenticated={authenticated} publicArtifacts={publicArtifacts} />} />
         <Route element={<Protected authenticated={authenticated} />}>
           <Route path="/tasks" element={<TasksPage />} />
@@ -52,7 +56,6 @@ export function App() {
     </Routes>
   );
 }
-
 function Protected({ authenticated }: { authenticated: boolean }) {
   const location = useLocation();
   return authenticated ? <Outlet /> : <Navigate to="/login" state={{ from: location }} replace />;

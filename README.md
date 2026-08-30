@@ -222,7 +222,8 @@ or not configured. Linux mounting uses systemd NFSv4.2 automount and requires
 `nfs-utils`/`nfs-common`, `systemd-escape`, and sudo. macOS uses `mount_nfs`.
 
 See [packages/client/README.md](packages/client/README.md) for client-only build and distribution
-details. The Web Integration page contains the same deployment-specific commands.
+details. Each deployment exposes the same generated integration guide at `/integration` for
+people and `/integration.md` as plain Markdown for agents.
 
 ## Storage layout and schema
 

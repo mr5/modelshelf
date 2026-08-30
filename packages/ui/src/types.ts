@@ -5,7 +5,6 @@ export interface ModelOption {
   name: string;
   detail?: string;
 }
-
 export interface ModelSearch {
   provider: Provider;
   query: string;
@@ -78,6 +77,10 @@ export interface ServerInfo {
     installUrl: string;
     downloadUrl: string;
     platforms: Array<{ os: string; arch: string; filename: string }>;
+  };
+  documentation?: {
+    humanUrl: string;
+    agentUrl: string;
   };
   network?: {
     mirrors: Partial<Record<Provider, string>>;

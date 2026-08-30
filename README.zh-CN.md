@@ -209,8 +209,8 @@ modelshelf upgrade [--check] [--github]
 配置。Linux 的 `mount` 使用 systemd NFSv4.2 automount，需要 `nfs-utils`/`nfs-common`、
 `systemd-escape` 和 sudo；macOS 使用 `mount_nfs`。
 
-客户端独立构建和发行细节见 [packages/client/README.md](packages/client/README.md)。Web 集成
-页面也会根据当前部署生成对应命令。
+客户端独立构建和发行细节见 [packages/client/README.md](packages/client/README.md)。每个部署会
+基于同一来源生成集成文档：`/integration` 面向用户，`/integration.md` 为 agent 提供纯 Markdown。
 
 ## 服务端存储与 schema
 

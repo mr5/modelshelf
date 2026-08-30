@@ -85,3 +85,7 @@ jobs:
         run: docker build -t modelshelf:ci .
       - name: Build NFS image
         run: docker build -t modelshelf-nfs:ci docker/nfs
+      - name: Test NFSv4.1 and NFSv4.2 content reads
+        env:
+          MODELSHELF_NFS_TEST_IMAGE: modelshelf-nfs:ci
+        run: sudo --preserve-env=MODELSHELF_NFS_TEST_IMAGE ./scripts/test_nfs_compatibility.sh

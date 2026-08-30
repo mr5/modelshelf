@@ -260,7 +260,7 @@ def test_artifacts_are_public_by_default_and_can_require_authentication(tmp_path
             "host": "modelshelf.internal",
             "port": 32049,
             "exportPath": "/modelshelf",
-            "version": "4.2",
+            "version": "4.1",
         }
         assert client.get("/api/v1/artifacts").status_code == 200
         assert client.get("/api/v1/artifacts/not-present").status_code == 404

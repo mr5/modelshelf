@@ -138,11 +138,22 @@ def load_task_json(raw: str) -> tuple[DownloadTask, bool]:
     return DownloadTask.model_validate(document), migrated
 
 
-def load_storage_layout_json(raw: str) -> StorageLayout:
-    document, _migrated = _migrate_document(
+def _storage_layout_v1_to_v2(document: dict[str, Any]) -> dict[str, Any]:
+    # Version 2 records that artifact namespace traversal permissions have
+    # been normalized. The directory repair itself is performed by Catalog.
+    return dict(document)
+
+
+def migrate_storage_layout_json(raw: str) -> tuple[StorageLayout, bool]:
+    document, migrated = _migrate_document(
         _json_object(raw, "storage layout"),
         document_name="storage layout",
         current_version=STORAGE_LAYOUT_SCHEMA_VERSION,
-        migrations={},
+        migrations={1: _storage_layout_v1_to_v2},
     )
-    return StorageLayout.model_validate(document)
+    return StorageLayout.model_validate(document), migrated
+
+
+def load_storage_layout_json(raw: str) -> StorageLayout:
+    layout, _migrated = migrate_storage_layout_json(raw)
+    return layout

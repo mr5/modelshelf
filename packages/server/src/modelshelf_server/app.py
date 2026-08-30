@@ -473,7 +473,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "host": settings.nfs_advertised_host,
                 "port": settings.nfs_advertised_port or settings.nfs_port,
                 "exportPath": settings.nfs_export_path,
-                "version": "4.2",
+                "version": "4.1",
             }
             if settings.nfs_advertised_host
             else None

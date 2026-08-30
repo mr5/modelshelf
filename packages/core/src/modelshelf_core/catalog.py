@@ -30,7 +30,7 @@ from .models import (
     SourceReference,
     StorageLayout,
 )
-from .schema import FutureSchemaVersionError, load_manifest_json, load_storage_layout_json
+from .schema import FutureSchemaVersionError, load_manifest_json, migrate_storage_layout_json
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +187,18 @@ def _artifact_manifest_paths(root: Path) -> Iterator[Path]:
         directories[:] = sorted(name for name in directories if name != ".modelshelf")
 
 
+def _ensure_artifact_parent_permissions(artifacts_root: Path, artifact_root: Path) -> None:
+    artifacts_root = artifacts_root.resolve()
+    artifact_root = artifact_root.resolve()
+    if artifact_root == artifacts_root or artifacts_root not in artifact_root.parents:
+        raise VerificationError("artifact path must stay below the artifact root")
+    os.chmod(artifacts_root, 0o755)
+    current = artifact_root.parent
+    while current != artifacts_root:
+        os.chmod(current, 0o755)
+        current = current.parent
+
+
 class Catalog:
     def __init__(self, storage_root: Path) -> None:
         self.storage_root = storage_root.resolve()
@@ -208,13 +220,25 @@ class Catalog:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         if self.layout_path.exists():
-            load_storage_layout_json(self.layout_path.read_text(encoding="utf-8"))
+            layout, migrated = migrate_storage_layout_json(
+                self.layout_path.read_text(encoding="utf-8")
+            )
+            if migrated:
+                for manifest_path in _artifact_manifest_paths(self.artifacts_root):
+                    _ensure_artifact_parent_permissions(
+                        self.artifacts_root, manifest_path.parent.parent
+                    )
+                atomic_write_json(
+                    self.layout_path,
+                    layout.model_dump(mode="json", by_alias=True),
+                )
         else:
-            layout = StorageLayout(schema_version=1)
+            layout = StorageLayout(schema_version=2)
             atomic_write_json(
                 self.layout_path,
                 layout.model_dump(mode="json", by_alias=True),
             )
+        os.chmod(self.artifacts_root, 0o755)
         self.index.initialize()
         self.reconcile_index()
 
@@ -276,6 +300,7 @@ class Catalog:
             manifest.source.selected_paths,
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_artifact_parent_permissions(self.artifacts_root, destination)
         if destination.exists():
             existing = self.read_manifest(destination)
             if existing.content_sha256 != manifest.content_sha256:

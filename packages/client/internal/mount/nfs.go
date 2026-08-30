@@ -28,6 +28,10 @@ func Mount(ctx context.Context, configuration config.Config, client *api.Client)
 	if info.NFS.Port < 1 || info.NFS.Port > 65535 {
 		return errors.New("server advertised an invalid NFS port")
 	}
+	version, err := validatedNFSVersion(info.NFS.Version)
+	if err != nil {
+		return err
+	}
 	source, err := validatedNFSSource(info.NFS.Host, info.NFS.ExportPath)
 	if err != nil {
 		return err
@@ -44,7 +48,7 @@ func Mount(ctx context.Context, configuration config.Config, client *api.Client)
 	}
 	switch runtime.GOOS {
 	case "linux":
-		return installSystemdMount(ctx, target, source, info.NFS.Port)
+		return installSystemdMount(ctx, target, source, info.NFS.Port, version)
 	case "darwin":
 		return run(
 			ctx,
@@ -89,7 +93,7 @@ func Unmount(ctx context.Context, configuration config.Config) error {
 	return run(ctx, "sudo", "systemctl", "daemon-reload")
 }
 
-func installSystemdMount(ctx context.Context, target, source string, port int) error {
+func installSystemdMount(ctx context.Context, target, source string, port int, version string) error {
 	if err := validateMountTarget(target); err != nil {
 		return err
 	}
@@ -106,12 +110,12 @@ Wants=network-online.target
 What=%s
 Where=%s
 Type=nfs4
-Options=ro,vers=4.2,port=%d,lookupcache=positive,_netdev,nofail
+Options=ro,hard,vers=%s,port=%d,lookupcache=positive,_netdev,nofail
 TimeoutSec=60
 
 [Install]
 WantedBy=multi-user.target
-`, source, target, port)
+`, source, target, version, port)
 	automountContent := fmt.Sprintf(`[Unit]
 Description=ModelShelf NFS automount
 
@@ -147,6 +151,18 @@ WantedBy=multi-user.target
 		return err
 	}
 	return run(ctx, "sudo", "systemctl", "enable", "--now", unit+".automount")
+}
+
+func validatedNFSVersion(version string) (string, error) {
+	if version == "" {
+		// Older API implementations may omit this additive field. Use the
+		// compatibility baseline instead of negotiating the highest minor version.
+		return "4.1", nil
+	}
+	if version != "4.1" && version != "4.2" {
+		return "", errors.New("server advertised an unsupported NFS version")
+	}
+	return version, nil
 }
 
 func validatedNFSSource(host, exportPath string) (string, error) {

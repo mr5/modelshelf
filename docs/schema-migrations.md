@@ -28,6 +28,13 @@ version at a time without skipping intermediate versions.
 5. Published manifests are normalized in memory by version-specific readers. Payload identity and filesystem location do not change just because metadata syntax evolves.
 6. A migration release must include fixtures for every supported source version, future-version rejection tests, interruption/atomicity tests, and downgrade tests.
 
+## Storage layout version 2
+
+Storage layout v2 records the traversal-permission invariant for the exported artifact namespace.
+The v1 to v2 migration changes only `artifacts/` and the source/vendor/model ancestor directories
+of valid manifests to mode `0755`. Immutable revision directories and artifact files are never
+modified. New publication also enforces parent traversal explicitly instead of inheriting umask.
+
 ## Version 1 baseline
 
 The first public release establishes version 1 for manifest, task, server layout, client config,

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 MANIFEST_SCHEMA_VERSION: Literal[2] = 2
 TASK_SCHEMA_VERSION: Literal[5] = 5
-STORAGE_LAYOUT_SCHEMA_VERSION: Literal[1] = 1
+STORAGE_LAYOUT_SCHEMA_VERSION: Literal[2] = 2
 
 
 def to_camel(value: str) -> str:
@@ -104,7 +104,7 @@ class ArtifactManifest(Model):
 
 
 class StorageLayout(Model):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     kind: Literal["modelshelf-storage"] = "modelshelf-storage"
 
 

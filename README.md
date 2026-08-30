@@ -8,7 +8,7 @@ rebuildable catalog index.
 
 The v1 server supports Hugging Face Hub, ModelScope CN, ModelScope AI, GitHub Releases, Kaggle
 Models, Generic HTTP URLs, and allowlisted server-local imports. A separate NFS-Ganesha container
-exports completed artifacts read-only over NFSv4.2. The client is a standalone Go binary for Linux
+exports completed artifacts read-only over NFSv4.1. The client is a standalone Go binary for Linux
 and macOS on amd64 and arm64.
 
 ## Core guarantees
@@ -210,6 +210,7 @@ modelshelf sync [alias] [--update | --frozen-lockfile]
 modelshelf list
 modelshelf search <query>
 modelshelf status <alias>
+modelshelf status --all
 modelshelf verify [--full] [--unexpected] <alias-or-path>
 modelshelf remove [-y] <alias>
 modelshelf tui
@@ -218,7 +219,7 @@ modelshelf upgrade [--check] [--github]
 ```
 
 `status` exits `0` when ready, `2` when not ready, `3` when corrupt, and `4` when unavailable
-or not configured. Linux mounting uses systemd NFSv4.2 automount and requires
+or not configured. Linux mounting uses systemd NFSv4.1 automount and requires
 `nfs-utils`/`nfs-common`, `systemd-escape`, and sudo. macOS uses `mount_nfs`.
 
 See [packages/client/README.md](packages/client/README.md) for client-only build and distribution

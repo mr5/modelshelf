@@ -5,6 +5,10 @@ NFS_Core_Param {
     NFS_Port = 2049;
     Enable_NLM = false;
     Enable_RQUOTA = false;
+    # Ganesha 6.x uses PR_SET_IO_FLUSHER. The exporter runs in a constrained
+    # container and is never mounted back on its own host, so startup may
+    # continue if the container namespace cannot grant this prctl.
+    Allow_Set_Io_Flusher_Fail = true;
 }
 
 EXPORT {
@@ -17,9 +21,10 @@ EXPORT {
     SecType = sys;
     Squash = Root_Squash;
     # Artifacts are atomically published by the separate ModelShelf process.
-    # Do not retain metadata or directory entries for out-of-band changes.
+    # Expire attributes immediately and do not trust negative readdir cache
+    # entries so newly renamed artifacts become visible without disabling the
+    # directory chunk cache recommended by Ganesha.
     Attr_Expiration_Time = 0;
-    DisableDirCaching = true;
     Trust_Readdir_Negative_Cache = false;
 
     CLIENT {

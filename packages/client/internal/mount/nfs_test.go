@@ -2,6 +2,30 @@ package mount
 
 import "testing"
 
+func TestValidatedNFSVersion(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{"", "4.1", true},
+		{"4.1", "4.1", true},
+		{"4.2", "4.2", true},
+		{"4", "", false},
+		{"3", "", false},
+		{"4.2,soft", "", false},
+	}
+	for _, test := range tests {
+		got, err := validatedNFSVersion(test.input)
+		if test.ok && (err != nil || got != test.want) {
+			t.Errorf("validatedNFSVersion(%q) = %q, %v", test.input, got, err)
+		}
+		if !test.ok && err == nil {
+			t.Errorf("validatedNFSVersion(%q) unexpectedly returned %q", test.input, got)
+		}
+	}
+}
+
 func TestValidatedNFSSource(t *testing.T) {
 	tests := []struct {
 		host       string

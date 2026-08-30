@@ -45,6 +45,38 @@ models: []
 	}
 }
 
+func TestStatusAllChecksEveryConfiguredModel(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yml")
+	configuration := `serverUrl: http://127.0.0.1:1
+nfsLocalPath: /mnt/modelshelf
+localBasePath: ` + filepath.Join(root, "models") + `
+models:
+  - alias: first
+    provider: huggingface
+    id: owner/first
+    revision: main
+  - alias: second
+    provider: modelscope-cn
+    id: owner/second
+    revision: master
+`
+	if err := os.WriteFile(configPath, []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	command := NewWithIO("test", "commit", bytes.NewBuffer(nil), &output, &output)
+	command.SetArgs([]string{"--config", configPath, "status", "--all"})
+	err := command.Execute()
+	if ExitCode(err) != ExitNotReady {
+		t.Fatalf("status --all exit=%d err=%v output=%s", ExitCode(err), err, output.String())
+	}
+	if !strings.Contains(output.String(), "first: not ready") ||
+		!strings.Contains(output.String(), "second: not ready") {
+		t.Fatalf("status --all output=%s", output.String())
+	}
+}
+
 func TestRootContainsCompleteCommandSet(t *testing.T) {
 	command := NewWithIO("test", "commit", bytes.NewBuffer(nil), &bytes.Buffer{}, &bytes.Buffer{})
 	wanted := map[string]bool{

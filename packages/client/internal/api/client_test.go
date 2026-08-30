@@ -19,7 +19,7 @@ func TestArtifactsAndCreateTask(t *testing.T) {
 			writer.Header().Set("Content-Type", "application/json")
 			_, _ = writer.Write([]byte(`{
   "name":"ModelShelf","version":"test",
-  "nfs":{"host":"modelshelf.internal","port":32049,"exportPath":"/modelshelf","version":"4.2"},
+  "nfs":{"host":"modelshelf.internal","port":32049,"exportPath":"/modelshelf","version":"4.1"},
   "client":{"available":true,"version":"0.2.0","installUrl":"https://modelshelf.internal/install.sh",
     "downloadUrl":"https://modelshelf.internal/api/v1/client",
     "platforms":[{"os":"linux","arch":"amd64","filename":"modelshelf_linux_amd64.tar.gz"}]}

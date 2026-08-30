@@ -7,7 +7,7 @@ artifact 自带的 manifest 是事实来源；SQLite 仅用于构建可随时重
 
 v1 服务端支持 Hugging Face Hub、ModelScope CN、ModelScope AI、GitHub Releases、Kaggle
 Models、Generic HTTP URL 和白名单内的服务端本地导入。独立的 NFS-Ganesha 容器通过
-NFSv4.2 只读导出已完成的 artifact。客户端是面向 Linux/macOS、amd64/arm64 的独立 Go
+NFSv4.1 只读导出已完成的 artifact。客户端是面向 Linux/macOS、amd64/arm64 的独立 Go
 二进制文件。
 
 ## 核心保证
@@ -198,6 +198,7 @@ modelshelf sync [alias] [--update | --frozen-lockfile]
 modelshelf list
 modelshelf search <query>
 modelshelf status <alias>
+modelshelf status --all
 modelshelf verify [--full] [--unexpected] <alias-or-path>
 modelshelf remove [-y] <alias>
 modelshelf tui
@@ -206,7 +207,7 @@ modelshelf upgrade [--check] [--github]
 ```
 
 `status` 的稳定退出码为：`0` 已满足 desired state、`2` 未就绪、`3` 已损坏、`4` 不可用或未
-配置。Linux 的 `mount` 使用 systemd NFSv4.2 automount，需要 `nfs-utils`/`nfs-common`、
+配置。Linux 的 `mount` 使用 systemd NFSv4.1 automount，需要 `nfs-utils`/`nfs-common`、
 `systemd-escape` 和 sudo；macOS 使用 `mount_nfs`。
 
 客户端独立构建和发行细节见 [packages/client/README.md](packages/client/README.md)。每个部署会

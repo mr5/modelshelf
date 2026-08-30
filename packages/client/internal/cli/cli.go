@@ -600,14 +600,65 @@ func (application *Application) syncCommand() *cobra.Command {
 }
 
 func (application *Application) statusCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "status <alias> | <provider> <model-id>",
+	var all bool
+	command := &cobra.Command{
+		Use:   "status <alias> | <provider> <model-id> | --all",
 		Short: "Check desired state (exit 0 ready, 2 not ready, 3 corrupt, 4 unavailable)",
-		Args:  cobra.RangeArgs(1, 2),
+		Args: func(command *cobra.Command, arguments []string) error {
+			if all {
+				if len(arguments) != 0 {
+					return errors.New("--all cannot be combined with a model argument")
+				}
+				return nil
+			}
+			return cobra.RangeArgs(1, 2)(command, arguments)
+		},
 		RunE: func(command *cobra.Command, arguments []string) error {
 			configuration, path, err := application.loadConfig()
 			if err != nil {
 				return err
+			}
+			locked, _, err := application.loadLock(lockfile.Path(path), true)
+			if err != nil {
+				return err
+			}
+			if all {
+				failures := 0
+				worstExitCode := ExitOK
+				for _, desired := range configuration.Models {
+					artifactID, statusErr := application.desiredStatus(
+						command.Context(), configuration, locked, desired,
+					)
+					label := desired.Alias
+					if label == "" {
+						label = desired.Provider + "/" + desired.ID
+					}
+					if statusErr == nil {
+						fmt.Fprintf(application.Stdout, "%s: ready: %s\n", label, artifactID)
+						continue
+					}
+					code := ExitCode(statusErr)
+					if code == 1 {
+						return statusErr
+					}
+					failures++
+					if code > worstExitCode {
+						worstExitCode = code
+					}
+					fmt.Fprintf(application.Stdout, "%s: %s\n", label, statusErr)
+				}
+				if failures != 0 {
+					return &ExitError{
+						Code: worstExitCode,
+						Err: fmt.Errorf(
+							"%d of %d configured models are not ready",
+							failures,
+							len(configuration.Models),
+						),
+					}
+				}
+				fmt.Fprintf(application.Stdout, "ready: %d configured models\n", len(configuration.Models))
+				return nil
 			}
 			desired, err := desiredFromArguments(&configuration, arguments)
 			if err != nil {
@@ -616,72 +667,85 @@ func (application *Application) statusCommand() *cobra.Command {
 			if desired == nil {
 				return &ExitError{Code: ExitUnavailable, Err: errors.New("unavailable: model is not configured")}
 			}
-			locked, _, err := application.loadLock(lockfile.Path(path), true)
+			artifactID, err := application.desiredStatus(
+				command.Context(), configuration, locked, *desired,
+			)
 			if err != nil {
 				return err
 			}
-			entry := lockfile.Find(locked, *desired)
-			if entry == nil {
-				return &ExitError{Code: ExitNotReady, Err: errors.New("not ready: model is not locked; run modelshelf sync")}
-			}
-			desired.ResolvedRevision = entry.ResolvedRevision
-			desired.ArtifactID = entry.ArtifactID
-			desired.RelativePath = entry.RelativePath
-			provider, id := desired.Provider, desired.ID
-			target, err := config.ArtifactPath(configuration, entry.RelativePath)
-			if err != nil {
-				return err
-			}
-			if info, statErr := os.Stat(target); statErr != nil || !info.IsDir() {
-				message := "not ready: local directory is missing"
-				if configuration.WriteToken != "" {
-					tasks, taskErr := api.New(configuration.ServerURL, configuration.WriteToken).
-						Tasks(command.Context())
-					if taskErr == nil {
-						matching := []domain.DownloadTask{}
-						for _, task := range tasks {
-							if task.Provider == provider && task.SourceID == id {
-								matching = append(matching, task)
-							}
-						}
-						sort.Slice(matching, func(left, right int) bool {
-							return matching[left].CreatedAt.After(matching[right].CreatedAt)
-						})
-						if len(matching) != 0 {
-							latest := matching[0]
-							message += fmt.Sprintf("; server task %s %d%%", latest.Status, latest.Progress)
-							if latest.Error != "" {
-								message += " (" + latest.Error + ")"
-							}
-						}
-					}
-				}
-				return &ExitError{Code: ExitNotReady, Err: errors.New(message)}
-			}
-			failures, err := catalog.Verify(target, catalog.VerifyOptions{})
-			if err != nil {
-				return &ExitError{Code: ExitCorrupt, Err: fmt.Errorf("corrupt: %w", err)}
-			}
-			if len(failures) != 0 {
-				return &ExitError{Code: ExitCorrupt, Err: errors.New("corrupt: " + strings.Join(failures, "; "))}
-			}
-			manifest, err := catalog.ReadManifest(target)
-			if err != nil {
-				return &ExitError{Code: ExitCorrupt, Err: err}
-			}
-			if !manifestMatchesDesired(manifest, *desired) {
-				return &ExitError{
-					Code: ExitNotReady,
-					Err:  errors.New("not ready: local artifact identity differs from desired state"),
-				}
-			}
-			if failures := syncer.ReferenceFailures(configuration, *desired, target); len(failures) != 0 {
-				return &ExitError{Code: ExitNotReady, Err: errors.New("not ready: " + strings.Join(failures, "; "))}
-			}
-			fmt.Fprintf(application.Stdout, "ready: %s\n", manifest.ArtifactID)
+			fmt.Fprintf(application.Stdout, "ready: %s\n", artifactID)
 			return nil
 		},
 	}
+	command.Flags().BoolVar(&all, "all", false, "check every configured model")
+	return command
+}
+
+func (application *Application) desiredStatus(
+	ctx context.Context,
+	configuration config.Config,
+	locked lockfile.File,
+	desired domain.DesiredModel,
+) (string, error) {
+	entry := lockfile.Find(locked, desired)
+	if entry == nil {
+		return "", &ExitError{Code: ExitNotReady, Err: errors.New("not ready: model is not locked; run modelshelf sync")}
+	}
+	desired.ResolvedRevision = entry.ResolvedRevision
+	desired.ArtifactID = entry.ArtifactID
+	desired.RelativePath = entry.RelativePath
+	provider, id := desired.Provider, desired.ID
+	target, err := config.ArtifactPath(configuration, entry.RelativePath)
+	if err != nil {
+		return "", err
+	}
+	if info, statErr := os.Stat(target); statErr != nil || !info.IsDir() {
+		message := "not ready: local directory is missing"
+		if configuration.WriteToken != "" {
+			tasks, taskErr := api.New(configuration.ServerURL, configuration.WriteToken).
+				Tasks(ctx)
+			if taskErr == nil {
+				matching := []domain.DownloadTask{}
+				for _, task := range tasks {
+					if task.Provider == provider && task.SourceID == id {
+						matching = append(matching, task)
+					}
+				}
+				sort.Slice(matching, func(left, right int) bool {
+					return matching[left].CreatedAt.After(matching[right].CreatedAt)
+				})
+				if len(matching) != 0 {
+					latest := matching[0]
+					message += fmt.Sprintf("; server task %s %d%%", latest.Status, latest.Progress)
+					if latest.Error != "" {
+						message += " (" + latest.Error + ")"
+					}
+				}
+			}
+		}
+		return "", &ExitError{Code: ExitNotReady, Err: errors.New(message)}
+	}
+	failures, err := catalog.Verify(target, catalog.VerifyOptions{})
+	if err != nil {
+		return "", &ExitError{Code: ExitCorrupt, Err: fmt.Errorf("corrupt: %w", err)}
+	}
+	if len(failures) != 0 {
+		return "", &ExitError{Code: ExitCorrupt, Err: errors.New("corrupt: " + strings.Join(failures, "; "))}
+	}
+	manifest, err := catalog.ReadManifest(target)
+	if err != nil {
+		return "", &ExitError{Code: ExitCorrupt, Err: err}
+	}
+	if !manifestMatchesDesired(manifest, desired) {
+		return "", &ExitError{
+			Code: ExitNotReady,
+			Err:  errors.New("not ready: local artifact identity differs from desired state"),
+		}
+	}
+	if failures := syncer.ReferenceFailures(configuration, desired, target); len(failures) != 0 {
+		return "", &ExitError{Code: ExitNotReady, Err: errors.New("not ready: " + strings.Join(failures, "; "))}
+	}
+	return manifest.ArtifactID, nil
 }
 
 func (application *Application) verifyCommand() *cobra.Command {
@@ -756,7 +820,7 @@ func (application *Application) verifyCommand() *cobra.Command {
 func (application *Application) mountCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mount",
-		Short: "Mount the server's read-only NFSv4.2 export",
+		Short: "Mount the server's read-only NFSv4 export",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			configuration, _, err := application.loadConfig()

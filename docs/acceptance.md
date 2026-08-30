@@ -52,7 +52,7 @@ credential-free suite.
 ## NFS and client evidence
 
 A privileged Ubuntu client container containing neither Python nor rsync mounted NFS-Ganesha with
-`ro,vers=4.2,lookupcache=positive`. The exporter started before the artifact existed; after atomic
+`ro,hard,vers=4.1,lookupcache=positive`. The exporter started before the artifact existed; after atomic
 publication the client ran:
 
 ```text
@@ -68,6 +68,15 @@ modelshelf remove -y tiny-bert
 Ready-state commands exited `0`; a second sync was idempotent; hashes matched; removal deleted the
 unreferenced local tree; post-removal status exited `4`. Starting the exporter with
 `MODELSHELF_NFS_CLIENTS=0.0.0.0/0` without public opt-in exited `64` before Ganesha started.
+
+NFSv4.2 is an additional compatibility target for exporter versions containing the upstream
+Ganesha READ_PLUS fix. A v4.2 acceptance run must assert that the Linux client issued READ_PLUS in
+`/proc/self/mountstats`; merely negotiating minor version 2 does not exercise that path.
+`scripts/test_nfs_compatibility.sh` automates both the v4.1 baseline and this v4.2 sparse-file path.
+Set `MODELSHELF_REQUIRE_READ_PLUS=true` on a dedicated compatibility host to make absence of the
+operation fail the run. Desktop Docker and GitHub-hosted kernels that omit or do not use
+`CONFIG_NFS_V4_2_READ_PLUS` still test both protocol versions, while logging that the operation was
+not exercised instead of claiming coverage.
 
 ## Reviewer workflow
 

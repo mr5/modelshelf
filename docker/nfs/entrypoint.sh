@@ -35,8 +35,16 @@ for cidr in $clients; do
 done
 IFS="$old_ifs"
 
+# Ganesha 6.x parses an all-address CIDR as a path token rather than a client
+# expression. Preserve ModelShelf's explicit CIDR interface and normalize only
+# these two universal networks after the public-export opt-in check above.
+ganesha_clients="$clients"
+case ",$clients," in
+  *,0.0.0.0/0,*|*,::/0,*) ganesha_clients="*" ;;
+esac
+
 mkdir -p /run/dbus /run/ganesha /var/lib/nfs/ganesha
 dbus-daemon --system --fork --nopidfile
 /usr/sbin/rpcbind -w
-sed "s|__CLIENTS__|$clients|g" /etc/ganesha/ganesha.conf.template > /run/ganesha.conf
+sed "s|__CLIENTS__|$ganesha_clients|g" /etc/ganesha/ganesha.conf.template > /run/ganesha.conf
 exec /usr/bin/ganesha.nfsd -F -L STDERR -f /run/ganesha.conf

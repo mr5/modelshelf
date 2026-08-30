@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -137,10 +138,62 @@ def test_future_manifest_and_storage_layout_versions_are_rejected(tmp_path: Path
         catalog.read_manifest(stage)
 
     layout = json.loads(catalog.layout_path.read_text(encoding="utf-8"))
-    layout["schemaVersion"] = 2
+    layout["schemaVersion"] = 3
     catalog.layout_path.write_text(json.dumps(layout), encoding="utf-8")
     with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
         Catalog(tmp_path).initialize()
+
+
+def test_storage_layout_v1_migration_repairs_only_artifact_ancestors(
+    tmp_path: Path,
+) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.initialize()
+    stage = make_stage(catalog, "legacy")
+    manifest = catalog.create_manifest(stage, name="model", version="1", source=source())
+    destination, _ = catalog.publish(stage, manifest)
+    ancestors = [
+        catalog.artifacts_root,
+        catalog.artifacts_root / "huggingface",
+        catalog.artifacts_root / "huggingface/owner",
+        catalog.artifacts_root / "huggingface/owner/model",
+    ]
+    for ancestor in ancestors:
+        ancestor.chmod(0o700)
+    catalog.layout_path.write_text(
+        json.dumps({"schemaVersion": 1, "kind": "modelshelf-storage"}),
+        encoding="utf-8",
+    )
+
+    Catalog(tmp_path).initialize()
+
+    migrated = json.loads(catalog.layout_path.read_text(encoding="utf-8"))
+    assert migrated["schemaVersion"] == 2
+    assert all((path.stat().st_mode & 0o777) == 0o755 for path in ancestors)
+    assert (destination.stat().st_mode & 0o777) == 0o555
+    assert ((destination / "nested/model.gguf").stat().st_mode & 0o777) == 0o444
+
+
+def test_artifact_namespace_permissions_do_not_depend_on_umask(tmp_path: Path) -> None:
+    previous = os.umask(0o077)
+    try:
+        catalog = Catalog(tmp_path)
+        catalog.initialize()
+        stage = make_stage(catalog, "private-umask")
+        manifest = catalog.create_manifest(stage, name="model", version="1", source=source())
+        destination, _ = catalog.publish(stage, manifest)
+    finally:
+        os.umask(previous)
+
+    parents = [
+        catalog.artifacts_root,
+        catalog.artifacts_root / "huggingface",
+        catalog.artifacts_root / "huggingface/owner",
+        catalog.artifacts_root / "huggingface/owner/model",
+    ]
+    assert all((path.stat().st_mode & 0o777) == 0o755 for path in parents)
+    assert (destination.stat().st_mode & 0o777) == 0o555
+    assert ((destination / "nested/model.gguf").stat().st_mode & 0o777) == 0o444
 
 
 def test_artifact_paths_keep_source_names_readable_and_escape_only_unsafe_characters() -> None:

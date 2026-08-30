@@ -58,7 +58,7 @@ def render_integration_markdown(settings: Settings, request_base_url: str) -> st
     linux_mount = (
         "sudo mkdir -p /mnt/modelshelf\n"
         "sudo mount -t nfs4 "
-        f"-o ro,vers=4.2,port={port},lookupcache=positive "
+        f"-o ro,hard,vers=4.1,port={port},lookupcache=positive "
         f"{_shell_quote(source)} /mnt/modelshelf"
     )
     mac_mount = (
@@ -68,7 +68,7 @@ def render_integration_markdown(settings: Settings, request_base_url: str) -> st
     )
     fstab = (
         f"{source} /mnt/modelshelf nfs4 "
-        f"ro,vers=4.2,port={port},lookupcache=positive,_netdev,nofail,"
+        f"ro,hard,vers=4.1,port={port},lookupcache=positive,_netdev,nofail,"
         "x-systemd.automount 0 0"
     )
     compose_bind = """services:
@@ -87,7 +87,7 @@ volumes:
     driver: local
     driver_opts:
       type: nfs
-      o: {_shell_quote(f"addr={host},nfsvers=4.2,port={port},ro")}
+      o: {_shell_quote(f"addr={host},nfsvers=4.1,port={port},ro,hard")}
       device: {_shell_quote(f":{export_path}")}"""
     kubernetes = f"""apiVersion: v1
 kind: PersistentVolume
@@ -97,7 +97,7 @@ spec:
   capacity:
     storage: 1Pi
   accessModes: [ReadOnlyMany]
-  mountOptions: [nfsvers=4.2, port={port}, ro]
+  mountOptions: [nfsvers=4.1, port={port}, ro, hard]
   nfs:
     server: {host}
     path: {export_path}
@@ -160,7 +160,7 @@ models:
         )
 
     nfs_status = (
-        f"> Advertised endpoint: **NFSv4.2** at `{host}:{port}` with export `{export_path}`."
+        f"> Advertised endpoint: **NFSv4.1** at `{host}:{port}` with export `{export_path}`."
         if settings.nfs_advertised_host
         else "> **NFS discovery is not configured.** The examples use placeholders. Set "
         "`MODELSHELF_NFS_ADVERTISED_HOST` to publish the real endpoint."
@@ -289,7 +289,7 @@ models:
         "desired state or one model. `--update` refreshes moving revisions.",
         "- `modelshelf list`: show configured models, revisions, local state, size, and sync time.",
         "- `modelshelf status <alias>`: readiness check; exit `0` ready, `2` not ready, `3` "
-        "corrupt, `4` unavailable.",
+        "corrupt, `4` unavailable. Use `modelshelf status --all` for deployment readiness.",
         "- `modelshelf verify <model-path-or-alias> [--unexpected]`: validate the manifest, "
         "paths, and sizes; optionally report unexpected files.",
         "- `modelshelf verify --full <model-path-or-alias>`: also recompute every SHA-256.",

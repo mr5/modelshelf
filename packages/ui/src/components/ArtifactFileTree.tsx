@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { formatBytes } from "../api.ts";
-import type { FileEntry } from "../types.ts";
+type TreeFile = { path: string; size?: number };
 
 type TreeNode = {
   name: string;
@@ -8,11 +8,11 @@ type TreeNode = {
   kind: "directory" | "file";
   children: TreeNode[];
   fileCount: number;
-  totalSize: number;
+  totalSize?: number;
 };
 
-function buildTree(files: FileEntry[]): TreeNode[] {
-  type MutableNode = { name: string; path: string; children: Map<string, MutableNode>; file?: FileEntry };
+function buildTree(files: TreeFile[]): TreeNode[] {
+  type MutableNode = { name: string; path: string; children: Map<string, MutableNode>; file?: TreeFile };
   const root = new Map<string, MutableNode>();
   for (const file of files) {
     let children = root;
@@ -37,7 +37,11 @@ function buildTree(files: FileEntry[]): TreeNode[] {
         kind: children.length > 0 ? "directory" as const : "file" as const,
         children,
         fileCount: node.file ? 1 : children.reduce((total, child) => total + child.fileCount, 0),
-        totalSize: node.file?.size ?? children.reduce((total, child) => total + child.totalSize, 0),
+        totalSize: node.file
+          ? node.file.size
+          : children.every((child) => child.totalSize !== undefined)
+            ? children.reduce((total, child) => total + (child.totalSize ?? 0), 0)
+            : undefined,
       };
     })
     .sort((left, right) => left.kind === right.kind
@@ -69,14 +73,20 @@ function Rows({ nodes, expanded, searching, onToggle }: {
         {node.kind === "directory"
           ? <button type="button" className="file-tree-toggle" aria-label={`${open ? "Collapse" : "Expand"} ${node.path}`} aria-expanded={open} onClick={() => onToggle(node.path)}>{open ? "−" : "+"}</button>
           : <span className="file-tree-toggle" aria-hidden="true" />}
-        <span className="artifact-file-tree-label"><code title={node.path}>{node.name}{node.kind === "directory" ? "/" : ""}</code><small>{node.kind === "directory" ? `${node.fileCount.toLocaleString()} files · ` : ""}{formatBytes(node.totalSize)}</small></span>
+        <span className="artifact-file-tree-label">
+          <code title={node.path}>{node.name}{node.kind === "directory" ? "/" : ""}</code>
+          {(node.kind === "directory" || node.totalSize !== undefined) && <small>
+            {node.kind === "directory" ? `${node.fileCount.toLocaleString()} files` : ""}
+            {node.totalSize === undefined ? "" : `${node.kind === "directory" ? " · " : ""}${formatBytes(node.totalSize)}`}
+          </small>}
+        </span>
       </div>
       {open && node.children.length > 0 && <div className="file-tree-children"><Rows nodes={node.children} expanded={expanded} searching={searching} onToggle={onToggle} /></div>}
     </div>;
   })}</>;
 }
 
-export function ArtifactFileTree({ files }: { files: FileEntry[] }) {
+export function ArtifactFileTree({ files, title = "Files" }: { files: TreeFile[]; title?: string }) {
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const tree = useMemo(() => buildTree(files), [files]);
@@ -90,7 +100,7 @@ export function ArtifactFileTree({ files }: { files: FileEntry[] }) {
     });
   }
   return <section className="artifact-file-tree">
-    <div className="artifact-file-tree-head"><div><span>Files</span><strong>{files.length.toLocaleString()} files</strong></div><input type="search" value={query} placeholder="Filter file tree" aria-label="Filter artifact files" onChange={(event) => setQuery(event.target.value)} /></div>
+    <div className="artifact-file-tree-head"><div><span>{title}</span><strong>{files.length.toLocaleString()} files</strong></div><input type="search" value={query} placeholder="Filter file tree" aria-label={`Filter ${title.toLocaleLowerCase()}`} onChange={(event) => setQuery(event.target.value)} /></div>
     <div className="file-selection-list artifact-file-tree-list"><Rows nodes={visible} expanded={expanded} searching={normalizedQuery.length > 0} onToggle={toggle} />{visible.length === 0 && <p className="muted">No files match this filter.</p>}</div>
   </section>;
 }

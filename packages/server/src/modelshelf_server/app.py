@@ -207,6 +207,19 @@ class ResumeTaskRequest(BaseModel):
         return value.astimezone(UTC)
 
 
+class ScheduleTaskRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    scheduled_at: datetime = Field(alias="scheduledAt")
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def validate_scheduled_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("scheduled start must include a timezone")
+        return value.astimezone(UTC)
+
+
 def _sign_session(settings: Settings, expires: int) -> str:
     nonce = hashlib.sha256(str(time.time_ns()).encode()).digest()[:12]
     payload = f"{expires}:{base64.urlsafe_b64encode(nonce).decode()}"
@@ -861,6 +874,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             item = await manager.resume(
                 task_id, scheduled_at=body.scheduled_at if body is not None else None
             )
+        except KeyError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        return item.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    @app.put("/api/v1/tasks/{task_id}/schedule", dependencies=[Depends(require_write)])
+    async def reschedule_task(task_id: str, body: ScheduleTaskRequest) -> dict[str, Any]:
+        try:
+            item = await manager.reschedule(task_id, body.scheduled_at)
         except KeyError as error:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
         except ValueError as error:

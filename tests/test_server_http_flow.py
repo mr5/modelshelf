@@ -1021,6 +1021,16 @@ def test_task_can_be_scheduled_and_started_immediately(
         assert created.json()["resolvedRevision"] == resolved
         task_id = created.json()["id"]
 
+        replacement = scheduled_at + timedelta(hours=1)
+        rescheduled = client.put(
+            f"/api/v1/tasks/{task_id}/schedule",
+            json={"scheduledAt": replacement.isoformat()},
+            headers=headers,
+        )
+        assert rescheduled.status_code == 200
+        assert rescheduled.json()["status"] == "scheduled"
+        assert rescheduled.json()["scheduledAt"] == replacement.isoformat().replace("+00:00", "Z")
+
         started = client.post(f"/api/v1/tasks/{task_id}/start", headers=headers)
         assert started.status_code == 200
         assert started.json()["status"] == "queued"
@@ -1046,6 +1056,37 @@ def test_task_schedule_requires_an_explicit_timezone(tmp_path: Path) -> None:
 
     assert response.status_code == 422
     assert "scheduled start must include a timezone" in str(response.json()["detail"])
+
+
+def test_reschedule_requires_a_future_time(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    catalog = Catalog(storage)
+    catalog.initialize()
+    store = TaskStore(catalog.jobs_root)
+    task = store.create(
+        Provider.HUGGINGFACE,
+        "owner/model",
+        "main",
+        resolved_revision="4" * 40,
+        total_bytes=10,
+        disable_mirror=False,
+        disable_proxy=False,
+        scheduled_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    settings = Settings(
+        storage_root=storage,
+        write_tokens=("write-token",),
+        session_secret="test-session-secret-with-32-bytes-minimum",
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.put(
+            f"/api/v1/tasks/{task.id}/schedule",
+            json={"scheduledAt": (datetime.now(UTC) - timedelta(minutes=1)).isoformat()},
+            headers={"Authorization": "Bearer write-token"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "scheduled start must be in the future"
 
 
 def test_paused_task_can_schedule_a_delayed_resume(tmp_path: Path) -> None:

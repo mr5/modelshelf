@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat as stat_module
 import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -26,6 +27,7 @@ from .identity import (
 from .models import (
     ArtifactAliases,
     ArtifactManifest,
+    ArtifactStorageStats,
     ArtifactSummary,
     FileEntry,
     Provider,
@@ -609,6 +611,102 @@ class Catalog:
             raise
         except (OSError, ValueError):
             return None
+
+    def storage_stats(self, artifact_id: str) -> ArtifactStorageStats:
+        """Inspect inode/link metadata without reading artifact file contents."""
+        found = self.find(artifact_id)
+        if found is None:
+            raise KeyError(artifact_id)
+        summary, manifest = found
+        artifact_root = self.artifacts_root / summary.relative_path
+
+        def allocated_bytes(result: os.stat_result) -> int:
+            blocks = getattr(result, "st_blocks", None)
+            if blocks is None:
+                return ((result.st_size + 511) // 512) * 512
+            return int(blocks) * 512
+
+        inode_groups: dict[tuple[int, int], dict[str, int]] = {}
+        artifact_directories = {artifact_root}
+        for entry in manifest.files:
+            candidate = artifact_root / entry.path
+            result = candidate.lstat()
+            if not stat_module.S_ISREG(result.st_mode):
+                raise VerificationError(f"artifact entry is not a regular file: {entry.path}")
+            if result.st_size != entry.size:
+                raise VerificationError(
+                    f"artifact entry size changed: {entry.path}; "
+                    f"expected {entry.size}, got {result.st_size}"
+                )
+            key = (result.st_dev, result.st_ino)
+            group = inode_groups.setdefault(
+                key,
+                {
+                    "logical": 0,
+                    "allocated": allocated_bytes(result),
+                    "local_links": 0,
+                    "total_links": result.st_nlink,
+                },
+            )
+            group["logical"] += entry.size
+            group["local_links"] += 1
+            if group["total_links"] != result.st_nlink:
+                raise VerificationError(f"artifact inode changed during scan: {entry.path}")
+            parent = candidate.parent
+            while parent != artifact_root:
+                artifact_directories.add(parent)
+                parent = parent.parent
+
+        shared_logical = 0
+        shared_allocated = 0
+        shared_files = 0
+        exclusive_logical = 0
+        exclusive_allocated = 0
+        exclusive_files = 0
+        for group in inode_groups.values():
+            if group["total_links"] < group["local_links"]:
+                raise VerificationError("artifact hardlink count changed during scan")
+            if group["total_links"] > group["local_links"]:
+                shared_logical += group["logical"]
+                shared_allocated += group["allocated"]
+                shared_files += group["local_links"]
+            else:
+                exclusive_logical += group["logical"]
+                exclusive_allocated += group["allocated"]
+                exclusive_files += group["local_links"]
+
+        metadata_paths = set(artifact_directories)
+        internal_root = artifact_root / ".modelshelf"
+        for current, directories, files in os.walk(internal_root, followlinks=False):
+            current_path = Path(current)
+            metadata_paths.add(current_path)
+            metadata_paths.update(current_path / name for name in directories)
+            metadata_paths.update(current_path / name for name in files)
+        metadata_allocated = 0
+        metadata_inodes: set[tuple[int, int]] = set()
+        for path in metadata_paths:
+            result = path.lstat()
+            key = (result.st_dev, result.st_ino)
+            if key in metadata_inodes:
+                continue
+            metadata_inodes.add(key)
+            metadata_allocated += allocated_bytes(result)
+
+        estimated_reclaimable = exclusive_allocated + metadata_allocated
+        return ArtifactStorageStats(
+            artifact_id=artifact_id,
+            logical_size=manifest.total_size,
+            allocated_size=shared_allocated + estimated_reclaimable,
+            shared_logical_size=shared_logical,
+            shared_allocated_size=shared_allocated,
+            shared_file_count=shared_files,
+            exclusive_logical_size=exclusive_logical,
+            exclusive_allocated_size=exclusive_allocated,
+            exclusive_file_count=exclusive_files,
+            metadata_allocated_size=metadata_allocated,
+            estimated_reclaimable_size=estimated_reclaimable,
+            scanned_at=datetime.now(UTC),
+        )
 
     def delete(self, artifact_id: str) -> bool:
         """Atomically hide an artifact, then remove its files and index entry."""

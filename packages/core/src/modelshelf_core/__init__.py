@@ -4,6 +4,7 @@ from .models import (
     STORAGE_LAYOUT_SCHEMA_VERSION,
     TASK_SCHEMA_VERSION,
     ArtifactManifest,
+    ArtifactStorageStats,
     ArtifactSummary,
     DesiredModel,
     DownloadTask,
@@ -19,6 +20,7 @@ from .schema import FutureSchemaVersionError, SchemaVersionError
 
 __all__ = [
     "ArtifactManifest",
+    "ArtifactStorageStats",
     "ArtifactSummary",
     "Catalog",
     "DesiredModel",

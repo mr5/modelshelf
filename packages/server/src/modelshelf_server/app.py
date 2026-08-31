@@ -30,7 +30,13 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from modelshelf_core import Catalog, Provider, TaskStatus, validate_artifact_alias
+from modelshelf_core import (
+    Catalog,
+    Provider,
+    TaskStatus,
+    VerificationError,
+    validate_artifact_alias,
+)
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from . import __version__
@@ -722,6 +728,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as error:
             raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
         return summary.model_dump(mode="json", by_alias=True)
+
+    @app.post(
+        "/api/v1/artifacts/{artifact_id}/storage-stats",
+        dependencies=[Depends(require_write)],
+    )
+    async def artifact_storage_stats(artifact_id: str) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(catalog.storage_stats, artifact_id)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "artifact not found") from None
+        except (OSError, VerificationError) as error:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"artifact storage scan failed: {error}",
+            ) from error
+        return result.model_dump(mode="json", by_alias=True)
 
     @app.delete(
         "/api/v1/artifacts/{artifact_id}",

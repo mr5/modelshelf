@@ -6,7 +6,7 @@ import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
 import { FileTree } from "../components/FileTree.tsx";
 import { selectionSummary } from "../selection.ts";
 import { sourceModelUrl } from "../source.ts";
-import type { ArtifactDetail, ArtifactSummary, Page, Provider } from "../types.ts";
+import type { ArtifactDetail, ArtifactStorageStats, ArtifactSummary, Page, Provider } from "../types.ts";
 
 const pageSize = 48;
 
@@ -119,6 +119,9 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
   const [detailError, setDetailError] = useState("");
   const [aliasInput, setAliasInput] = useState("");
   const [savingAlias, setSavingAlias] = useState(false);
+  const [storageStats, setStorageStats] = useState<ArtifactStorageStats>();
+  const [storageStatsLoading, setStorageStatsLoading] = useState(false);
+  const [storageStatsError, setStorageStatsError] = useState("");
   useEffect(() => {
     let active = true;
     const timer = window.setTimeout(() => {
@@ -153,6 +156,8 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
     setArtifactDetail(undefined);
     setDetailLoading(true);
     setDetailError("");
+    setStorageStats(undefined);
+    setStorageStatsError("");
     void api<ArtifactDetail>(`/artifacts/${encodeURIComponent(artifactId)}`)
       .then((result) => {
         if (!active) return;
@@ -238,6 +243,22 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
     }
   }
 
+  async function calculateStorageStats() {
+    if (!artifactDetail) return;
+    setStorageStatsLoading(true);
+    setStorageStatsError("");
+    try {
+      const result = await api<ArtifactStorageStats>(`/artifacts/${encodeURIComponent(artifactDetail.summary.artifactId)}/storage-stats`, {
+        method: "POST",
+      });
+      setStorageStats(result);
+    } catch (cause) {
+      setStorageStatsError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setStorageStatsLoading(false);
+    }
+  }
+
   return <div className="page">
     <div className="page-head"><div><p className="eyebrow">Immutable storage</p><h1>Artifacts</h1><p className="muted">Only fully verified artifacts atomically added to this shelf appear here.</p></div></div>
     <div className="artifact-filters">
@@ -306,6 +327,19 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
               {artifactDetail.summary.selectionDigest && <div className="task-meta artifact-wide-meta"><span>Selection digest</span><strong className="mono">{artifactDetail.summary.selectionDigest}</strong></div>}
               <div className="task-meta artifact-wide-meta"><span>Storage path</span><strong className="mono">{artifactDetail.summary.relativePath}</strong></div>
             </div>
+            {canManage && <section className="artifact-storage-panel">
+              <div className="artifact-storage-head"><div><span>Disk usage</span><small>Calculated on demand from file allocation and hardlink metadata. This scan may wake sleeping disks.</small></div><button type="button" className="ghost" disabled={storageStatsLoading} onClick={() => void calculateStorageStats()}>{storageStatsLoading ? "Calculating…" : storageStats ? "Recalculate" : "Calculate disk usage"}</button></div>
+              {storageStatsError && <div className="error-box">{storageStatsError}</div>}
+              {storageStats && <>
+                <div className="artifact-storage-grid">
+                  <div><span>Logical content</span><strong>{formatBytes(storageStats.logicalSize)}</strong><small>Manifest file sizes</small></div>
+                  <div><span>Shared via hardlinks</span><strong>{formatBytes(storageStats.sharedLogicalSize)}</strong><small>{storageStats.sharedFileCount.toLocaleString()} files · {formatBytes(storageStats.sharedAllocatedSize)} allocated</small></div>
+                  <div><span>Exclusive content</span><strong>{formatBytes(storageStats.exclusiveLogicalSize)}</strong><small>{storageStats.exclusiveFileCount.toLocaleString()} files · {formatBytes(storageStats.exclusiveAllocatedSize)} allocated</small></div>
+                  <div><span>Estimated reclaimable</span><strong>{formatBytes(storageStats.estimatedReclaimableSize)}</strong><small>Includes {formatBytes(storageStats.metadataAllocatedSize)} of manifest and directory metadata</small></div>
+                </div>
+                <p className="artifact-storage-note">Allocated blocks referenced by this artifact: {formatBytes(storageStats.allocatedSize)}. Reclaimable space is an estimate; ZFS compression, RAID-Z allocation and snapshots can make the dataset-level change differ. Scanned {new Date(storageStats.scannedAt).toLocaleString()}.</p>
+              </>}
+            </section>}
             <FileTree files={artifactDetail.manifest.files} />
           </>}
         </div>

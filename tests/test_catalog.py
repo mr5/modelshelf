@@ -583,6 +583,51 @@ def test_delete_removes_artifact_files_and_index_entry(tmp_path: Path) -> None:
     assert not catalog.delete(manifest.artifact_id)
 
 
+def test_artifact_storage_stats_separate_shared_and_reclaimable_blocks(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path)
+    catalog.initialize()
+    first_stage = make_stage(catalog, "storage-first", b"shared-weights")
+    first_manifest = catalog.create_manifest(
+        first_stage,
+        name="model",
+        version="1",
+        source=source("first"),
+    )
+    first_path, _ = catalog.publish(first_stage, first_manifest)
+
+    second_stage = catalog.staging_path("storage-second")
+    (second_stage / "nested").mkdir(parents=True)
+    os.link(first_path / "nested/model.gguf", second_stage / "nested/model.gguf")
+    (second_stage / "config.json").write_bytes(b"exclusive-config")
+    second_manifest = catalog.create_manifest(
+        second_stage,
+        name="model",
+        version="2",
+        source=source("second"),
+    )
+    catalog.publish(second_stage, second_manifest)
+
+    stats = catalog.storage_stats(second_manifest.artifact_id)
+
+    assert stats.logical_size == len(b"shared-weights") + len(b"exclusive-config")
+    assert stats.shared_logical_size == len(b"shared-weights")
+    assert stats.shared_file_count == 1
+    assert stats.exclusive_logical_size == len(b"exclusive-config")
+    assert stats.exclusive_file_count == 1
+    assert stats.shared_allocated_size > 0
+    assert stats.exclusive_allocated_size > 0
+    assert stats.metadata_allocated_size > 0
+    assert stats.estimated_reclaimable_size == (
+        stats.exclusive_allocated_size + stats.metadata_allocated_size
+    )
+    assert stats.allocated_size == (
+        stats.shared_allocated_size + stats.estimated_reclaimable_size
+    )
+
+    with pytest.raises(KeyError):
+        catalog.storage_stats("missing-artifact")
+
+
 def test_artifact_aliases_are_unique_persistent_and_outside_manifests(tmp_path: Path) -> None:
     catalog = Catalog(tmp_path)
     catalog.initialize()

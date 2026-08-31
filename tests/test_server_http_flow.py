@@ -259,6 +259,10 @@ def test_delete_endpoints_require_write_access_and_remove_owned_data(tmp_path: P
         assert client.delete(f"/api/v1/tasks/{failed.id}").status_code == 401
         assert client.delete(f"/api/v1/artifacts/{manifest.artifact_id}").status_code == 401
         assert (
+            client.post(f"/api/v1/artifacts/{manifest.artifact_id}/storage-stats").status_code
+            == 401
+        )
+        assert (
             client.put(
                 f"/api/v1/artifacts/{manifest.artifact_id}/alias",
                 json={"alias": "small"},
@@ -275,6 +279,15 @@ def test_delete_endpoints_require_write_access_and_remove_owned_data(tmp_path: P
         detail = client.get(f"/api/v1/artifacts/{manifest.artifact_id}").json()
         assert detail["summary"]["alias"] == "small"
         assert client.get("/api/v1/artifacts", params={"q": "small"}).json()[0]["alias"] == "small"
+        storage_stats = client.post(
+            f"/api/v1/artifacts/{manifest.artifact_id}/storage-stats",
+            headers=headers,
+        )
+        assert storage_stats.status_code == 200
+        assert storage_stats.json()["logicalSize"] == len(b"weights")
+        assert storage_stats.json()["sharedLogicalSize"] == 0
+        assert storage_stats.json()["exclusiveLogicalSize"] == len(b"weights")
+        assert storage_stats.json()["estimatedReclaimableSize"] > 0
         assert (
             client.put(
                 f"/api/v1/artifacts/{manifest.artifact_id}/alias",

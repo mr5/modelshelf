@@ -158,6 +158,21 @@ class ArtifactSummary(Model):
         return SourceReference.valid_selected_paths(value)
 
 
+class ArtifactStorageStats(Model):
+    artifact_id: str
+    logical_size: int = Field(ge=0)
+    allocated_size: int = Field(ge=0)
+    shared_logical_size: int = Field(ge=0)
+    shared_allocated_size: int = Field(ge=0)
+    shared_file_count: int = Field(ge=0)
+    exclusive_logical_size: int = Field(ge=0)
+    exclusive_allocated_size: int = Field(ge=0)
+    exclusive_file_count: int = Field(ge=0)
+    metadata_allocated_size: int = Field(ge=0)
+    estimated_reclaimable_size: int = Field(ge=0)
+    scanned_at: datetime
+
+
 class InferredMetadata(Model):
     name: str
     version: str

@@ -216,6 +216,21 @@ export interface ArtifactDetail {
   manifest: ArtifactManifest;
 }
 
+export interface ArtifactStorageStats {
+  artifactId: string;
+  logicalSize: number;
+  allocatedSize: number;
+  sharedLogicalSize: number;
+  sharedAllocatedSize: number;
+  sharedFileCount: number;
+  exclusiveLogicalSize: number;
+  exclusiveAllocatedSize: number;
+  exclusiveFileCount: number;
+  metadataAllocatedSize: number;
+  estimatedReclaimableSize: number;
+  scannedAt: string;
+}
+
 export interface Page<T> {
   items: T[];
   total: number;

@@ -1,6 +1,6 @@
 [project]
 name = "modelshelf-workspace"
-version = "0.1.0b21"
+version = "0.1.0b22"
 requires-python = ">=3.12"
 dependencies = []
 

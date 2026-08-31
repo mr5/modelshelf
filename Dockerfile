@@ -1,4 +1,4 @@
-ARG MODELSHELF_VERSION=0.1.0-beta.21
+ARG MODELSHELF_VERSION=0.1.0-beta.22
 
 FROM node:24-bookworm-slim AS ui
 WORKDIR /src

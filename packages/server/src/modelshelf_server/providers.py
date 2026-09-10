@@ -1689,16 +1689,23 @@ async def _download_modelscope_git(
         )
         if lfs.returncode != 0:
             raise ProviderUnavailable("ModelScope downloads require git-lfs")
-        shutil.rmtree(destination, ignore_errors=True)
-        environment = _prepare_modelscope_git_checkout(
+        environment = _try_resume_modelscope_git_checkout(
             source_id,
-            revision,
             resolved_revision,
             destination,
             endpoint,
             token,
-            skip_lfs=True,
         )
+        if environment is None:
+            environment = _prepare_modelscope_git_checkout(
+                source_id,
+                revision,
+                resolved_revision,
+                destination,
+                endpoint,
+                token,
+                skip_lfs=True,
+            )
         selected = set(selected_paths) if selected_paths is not None else None
         worktree_paths = [
             path
@@ -1750,6 +1757,8 @@ async def _download_modelscope_git(
             )
         fetched_paths.extend(relative.as_posix() for relative, _object_id, _size in missing_lfs)
         transfer_total[0] = regular_file_size + sum(size for _path, _object_id, size in missing_lfs)
+        for _relative, object_id, size in missing_lfs:
+            _prepare_modelscope_lfs_resume(destination, object_id, size)
         environment.pop("GIT_LFS_SKIP_SMUDGE", None)
         if reusable_artifact_roots or selected is not None:
             full_pull = any("," in path.as_posix() for path, _object_id, _size in missing_lfs)
@@ -1915,6 +1924,104 @@ def _checked_modelscope_git(command: list[str], environment: dict[str, str]) -> 
         detail = safe_error_message(result.stderr.strip() or result.stdout.strip())
         raise ProviderRequestError(f"ModelScope Git operation failed: {detail}")
     return result.stdout.strip()
+
+
+def _try_resume_modelscope_git_checkout(
+    source_id: str,
+    resolved_revision: str,
+    destination: Path,
+    endpoint: str,
+    token: str | None,
+) -> dict[str, str] | None:
+    git_directory = destination / ".git"
+    if (
+        not destination.is_dir()
+        or destination.is_symlink()
+        or not git_directory.is_dir()
+        or git_directory.is_symlink()
+    ):
+        return None
+
+    environment = _modelscope_git_environment(token, skip_lfs=True)
+    expected_remote = f"{endpoint.rstrip('/')}/{source_id}.git"
+    try:
+        inside_worktree = _checked_modelscope_git(
+            ["git", "-C", str(destination), "rev-parse", "--is-inside-work-tree"],
+            environment,
+        )
+        remote = _checked_modelscope_git(
+            ["git", "-C", str(destination), "config", "--get", "remote.origin.url"],
+            environment,
+        )
+        head = _checked_modelscope_git(
+            ["git", "-C", str(destination), "rev-parse", "HEAD^{commit}"],
+            environment,
+        )
+        if inside_worktree != "true" or remote != expected_remote or head != resolved_revision:
+            return None
+
+        # Force every tracked file back through the checkout filter with smudging
+        # disabled. This restores LFS pointers for discovery while retaining the
+        # completed and partial objects under .git/lfs for `git lfs pull` to reuse.
+        _checked_modelscope_git(
+            [
+                "git",
+                "-C",
+                str(destination),
+                "checkout",
+                "--quiet",
+                "--detach",
+                "--force",
+                resolved_revision,
+            ],
+            environment,
+        )
+        _checked_modelscope_git(
+            ["git", "-C", str(destination), "checkout-index", "--all", "--force"],
+            environment,
+        )
+    except (OSError, ProviderRequestError):
+        return None
+    return environment
+
+
+def _prepare_modelscope_lfs_resume(
+    destination: Path, object_id: str, expected_size: int
+) -> None:
+    incomplete = destination / ".git/lfs/incomplete"
+    if not incomplete.is_dir() or incomplete.is_symlink():
+        return
+
+    canonical = incomplete / f"{object_id}.part"
+    candidates: list[tuple[int, Path]] = []
+    try:
+        entries = list(incomplete.iterdir())
+    except OSError:
+        return
+    for candidate in entries:
+        if not candidate.name.startswith(object_id):
+            continue
+        suffix = candidate.name.removeprefix(object_id)
+        if candidate.name == object_id or (suffix != ".part" and not suffix.isdecimal()):
+            continue
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            size = candidate.stat().st_size
+        except OSError:
+            continue
+        if 0 < size < expected_size:
+            candidates.append((size, candidate))
+    if not candidates:
+        return
+
+    _size, best = max(candidates, key=lambda item: item[0])
+    if best == canonical:
+        return
+    try:
+        os.replace(best, canonical)
+    except OSError:
+        return
 
 
 def _prepare_modelscope_git_checkout(

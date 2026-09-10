@@ -688,6 +688,183 @@ def test_modelscope_git_download_defers_lfs_integrity_to_manifest_hashing(
     assert not (destination / ".git").exists()
 
 
+def test_modelscope_git_checkout_resumes_matching_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "artifact"
+    incomplete = destination / ".git/lfs/incomplete/partial"
+    incomplete.parent.mkdir(parents=True)
+    incomplete.write_bytes(b"partial payload")
+    resolved_revision = "a" * 40
+    commands: list[list[str]] = []
+
+    def fake_git(command: list[str], environment: dict[str, str]) -> str:
+        commands.append(command)
+        assert environment["GIT_LFS_SKIP_SMUDGE"] == "1"
+        if command[-1] == "--is-inside-work-tree":
+            return "true"
+        if command[-2:] == ["--get", "remote.origin.url"]:
+            return "https://modelscope.test/owner/model.git"
+        if command[-1] == "HEAD^{commit}":
+            return resolved_revision
+        assert incomplete.read_bytes() == b"partial payload"
+        return ""
+
+    monkeypatch.setattr(provider_module, "_checked_modelscope_git", fake_git)
+
+    environment = provider_module._try_resume_modelscope_git_checkout(
+        "owner/model",
+        resolved_revision,
+        destination,
+        "https://modelscope.test",
+        None,
+    )
+
+    assert environment is not None
+    assert environment["GIT_LFS_SKIP_SMUDGE"] == "1"
+    assert commands[-2:] == [
+        [
+            "git",
+            "-C",
+            str(destination),
+            "checkout",
+            "--quiet",
+            "--detach",
+            "--force",
+            resolved_revision,
+        ],
+        ["git", "-C", str(destination), "checkout-index", "--all", "--force"],
+    ]
+    assert incomplete.read_bytes() == b"partial payload"
+
+
+@pytest.mark.parametrize(
+    ("remote", "head"),
+    [
+        ("https://modelscope.test/other/model.git", "a" * 40),
+        ("https://modelscope.test/owner/model.git", "b" * 40),
+    ],
+)
+def test_modelscope_git_checkout_rejects_mismatched_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remote: str,
+    head: str,
+) -> None:
+    destination = tmp_path / "artifact"
+    (destination / ".git").mkdir(parents=True)
+
+    def fake_git(command: list[str], _environment: dict[str, str]) -> str:
+        if command[-1] == "--is-inside-work-tree":
+            return "true"
+        if command[-2:] == ["--get", "remote.origin.url"]:
+            return remote
+        if command[-1] == "HEAD^{commit}":
+            return head
+        pytest.fail(f"unexpected checkout for mismatched stage: {command}")
+
+    monkeypatch.setattr(provider_module, "_checked_modelscope_git", fake_git)
+
+    assert (
+        provider_module._try_resume_modelscope_git_checkout(
+            "owner/model",
+            "a" * 40,
+            destination,
+            "https://modelscope.test",
+            None,
+        )
+        is None
+    )
+
+
+def test_modelscope_lfs_resume_promotes_largest_matching_partial(tmp_path: Path) -> None:
+    destination = tmp_path / "artifact"
+    incomplete = destination / ".git/lfs/incomplete"
+    incomplete.mkdir(parents=True)
+    object_id = "a" * 64
+    smaller = incomplete / f"{object_id}123"
+    larger = incomplete / f"{object_id}456"
+    unrelated = incomplete / "1234567890"
+    smaller.write_bytes(b"small")
+    larger.write_bytes(b"larger partial")
+    unrelated.write_bytes(b"unrelated")
+
+    provider_module._prepare_modelscope_lfs_resume(destination, object_id, 100)
+
+    canonical = incomplete / f"{object_id}.part"
+    assert canonical.read_bytes() == b"larger partial"
+    assert not larger.exists()
+    assert smaller.read_bytes() == b"small"
+    assert unrelated.read_bytes() == b"unrelated"
+
+
+def test_modelscope_git_download_preserves_partial_lfs_object_when_resuming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "artifact"
+    payload = b"complete model weights"
+    oid = hashlib.sha256(payload).hexdigest()
+    partial = destination / f".git/lfs/incomplete/{oid}1234567890"
+    partial.parent.mkdir(parents=True)
+    partial.write_bytes(b"partial payload")
+    canonical_partial = partial.with_name(f"{oid}.part")
+    (destination / "model.bin").write_text(
+        f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\n"
+        f"size {len(payload)}\n",
+        encoding="utf-8",
+    )
+    resolved_revision = "a" * 40
+    pull_saw_partial = False
+
+    monkeypatch.setattr(
+        provider_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    def fail_fresh_checkout(*_args: object, **_kwargs: object) -> dict[str, str]:
+        pytest.fail("a matching interrupted checkout should be resumed")
+
+    def fake_git(command: list[str], _environment: dict[str, str]) -> str:
+        nonlocal pull_saw_partial
+        if command[-1] == "--is-inside-work-tree":
+            return "true"
+        if command[-2:] == ["--get", "remote.origin.url"]:
+            return "https://modelscope.test/owner/model.git"
+        if command[-1] == "HEAD^{commit}":
+            return resolved_revision
+        if command[-2:] == ["lfs", "pull"]:
+            pull_saw_partial = (
+                not partial.exists()
+                and canonical_partial.read_bytes() == b"partial payload"
+            )
+            (destination / "model.bin").write_bytes(payload)
+        return ""
+
+    monkeypatch.setattr(
+        provider_module, "_prepare_modelscope_git_checkout", fail_fresh_checkout
+    )
+    monkeypatch.setattr(provider_module, "_checked_modelscope_git", fake_git)
+
+    result = asyncio.run(
+        provider_module._download_modelscope_git(
+            "owner/model",
+            "master",
+            resolved_revision,
+            destination,
+            lambda _downloaded, _total: asyncio.sleep(0),
+            "https://modelscope.test",
+            None,
+        )
+    )
+
+    assert pull_saw_partial
+    assert result.expected_sha256 == {"model.bin": oid}
+    assert result.fetched_paths == ["model.bin"]
+    assert (destination / "model.bin").read_bytes() == payload
+    assert not (destination / ".git").exists()
+
+
 def test_modelscope_git_download_reuses_matching_lfs_files_from_any_prior_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

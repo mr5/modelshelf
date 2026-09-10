@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections.abc import Sequence
 from getpass import getpass
@@ -103,6 +104,7 @@ def run(argv: Sequence[str] | None = None) -> None:
             parser.error(str(error))
         print(json.dumps(result, indent=2))
         return
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     uvicorn.run(
         "modelshelf_server.app:create_app",
         factory=True,

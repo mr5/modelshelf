@@ -25,7 +25,12 @@ from modelshelf_core import (
     SourceReference,
     TaskStatus,
 )
-from modelshelf_core.catalog import atomic_write_json, content_digest, inventory
+from modelshelf_core.catalog import (
+    atomic_write_json,
+    content_digest,
+    inventory,
+    remove_staging_tree,
+)
 from modelshelf_core.identity import artifact_identity
 from modelshelf_core.schema import load_task_json
 
@@ -74,6 +79,8 @@ class TaskStore:
         self.jobs_root = jobs_root
 
     def _path(self, task_id: str) -> Path:
+        if not task_id or task_id in {".", ".."} or Path(task_id).name != task_id:
+            raise ValueError("invalid task ID")
         return self.jobs_root / f"{task_id}.json"
 
     def create(
@@ -325,7 +332,7 @@ class TaskManager:
         stored_tasks = self.store.list()
         for task in stored_tasks:
             if task.status is TaskStatus.CANCELLED:
-                shutil.rmtree(self.catalog.staging_path(task.id), ignore_errors=True)
+                self._discard_stage(task.id, reason="previously cancelled by user")
         scheduled_tasks = [task for task in stored_tasks if task.status is TaskStatus.SCHEDULED]
         for task in scheduled_tasks:
             self._arm_scheduled_task(task)
@@ -500,7 +507,7 @@ class TaskManager:
         try:
             resumed = await self._transition(
                 task_id,
-                {TaskStatus.PAUSED},
+                {TaskStatus.PAUSED, TaskStatus.FAILED},
                 "scheduled for resume" if delayed else "resumed",
                 status=TaskStatus.SCHEDULED if delayed else TaskStatus.QUEUED,
                 scheduled_at=scheduled_at if delayed else None,
@@ -546,7 +553,7 @@ class TaskManager:
         if scheduled is not None:
             scheduled.cancel()
         self._resume_from_stage.discard(task_id)
-        shutil.rmtree(self.catalog.staging_path(task_id), ignore_errors=True)
+        self._discard_stage(task_id, reason="cancelled by user")
         await self._stop_metrics(cancelled.id, timing=timing, baseline=baseline, clear_eta=True)
         return await self._stop_verification_metrics(cancelled.id)
 
@@ -564,8 +571,13 @@ class TaskManager:
             async with self._artifact_lock:
                 self.catalog.delete(task.artifact_id)
         async with self._update_lock:
-            shutil.rmtree(self.catalog.staging_path(task_id), ignore_errors=True)
+            self._discard_stage(task_id, reason="task deleted by user")
             self.store.delete(task_id)
+
+    def _discard_stage(self, task_id: str, *, reason: str) -> None:
+        remove_staging_tree(
+            self.catalog.staging_path(task_id), self.catalog.staging_root, reason=reason
+        )
 
     async def delete_artifact(self, artifact_id: str) -> bool:
         async with self._artifact_lock:
@@ -1265,10 +1277,13 @@ class TaskManager:
         resume_from_stage = task.resume_from_stage or task_id in self._resume_from_stage
         self._resume_from_stage.discard(task_id)
         try:
-            if not resume_from_stage:
-                shutil.rmtree(stage, ignore_errors=True)
-            elif task.resume_from_stage:
-                task = self.store.update(task_id, {"resume_from_stage": False})
+            if stage.is_symlink() or stage.resolve() != stage.absolute():
+                raise RuntimeError("refusing to use staging through a symlink")
+            # Existing task data is always a recovery candidate, including a
+            # crash between queueing and persisting the resume flag.
+            resume_from_stage = resume_from_stage or stage.exists()
+            if not task.resume_from_stage:
+                task = self.store.update(task_id, {"resume_from_stage": True})
             stage.mkdir(parents=True, exist_ok=True)
             download_root = (
                 stage / "download" if task.provider is Provider.HTTP else stage / "artifact"
@@ -1330,6 +1345,12 @@ class TaskManager:
                     "provider returned a different resolved revision than the validated preflight"
                 )
             self._save_provider_result(stage, result)
+            if task.provider in {Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}:
+                git_metadata = download_root / ".git"
+                if git_metadata.exists():
+                    # Keep LFS objects until publication. The saved result lets
+                    # retries skip transfer and repeat verification safely.
+                    git_metadata.rename(stage / ".modelscope-git")
             if result.reuse_stats is not None:
                 reuse = result.reuse_stats
                 await self._update(
@@ -1485,13 +1506,14 @@ class TaskManager:
                 self.catalog.publish(download_root, manifest)
                 if task.artifact_alias is not None:
                     self.catalog.set_alias(manifest.artifact_id, task.artifact_alias)
-            shutil.rmtree(stage, ignore_errors=True)
+            self._discard_stage(task_id, reason="artifact published successfully")
             await self._update(
                 task_id,
                 status=TaskStatus.COMPLETED,
                 progress=100,
                 artifact_id=manifest.artifact_id,
                 artifact_total_bytes=manifest.total_size,
+                resume_from_stage=False,
                 instantaneous_bytes_per_second=0,
                 eta_seconds=0,
                 verification_instantaneous_bytes_per_second=0,
@@ -1500,10 +1522,10 @@ class TaskManager:
         except asyncio.CancelledError:
             raise
         except Exception as error:  # worker failures must be durable and visible
-            shutil.rmtree(stage, ignore_errors=True)
             await self._update(
                 task_id,
                 status=TaskStatus.FAILED,
+                resume_from_stage=True,
                 error=provider_failure_detail(task.provider, "download task", error),
                 instantaneous_bytes_per_second=0,
                 eta_seconds=None,
@@ -1598,7 +1620,8 @@ class TaskManager:
             if len(files) != 1:
                 raise ValueError("automatic extraction requires exactly one downloaded archive")
             publish_root = stage / "publish"
-            shutil.rmtree(publish_root, ignore_errors=True)
+            if publish_root.exists():
+                publish_root.rename(stage / f"publish-retained-{uuid4()}")
             await self._update(task_id, verification_detail="Extracting the archive")
             await asyncio.to_thread(extract_archive, download_root / files[0].path, publish_root)
             await self._update(
@@ -1632,7 +1655,7 @@ class TaskManager:
             self.catalog.publish(publish_root, manifest)
             if task.artifact_alias is not None:
                 self.catalog.set_alias(manifest.artifact_id, task.artifact_alias)
-        shutil.rmtree(stage, ignore_errors=True)
+        self._discard_stage(task_id, reason="HTTP artifact published successfully")
         return await self._update(
             task_id,
             status=TaskStatus.COMPLETED,

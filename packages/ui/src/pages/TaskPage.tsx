@@ -161,7 +161,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
       {canPause && <button className="ghost" disabled={actionBusy} onClick={() => void control("pause")}>Pause</button>}
       {task.status === "scheduled" && task.scheduledAt && <ScheduleControl scheduledAt={task.scheduledAt} disabled={actionBusy} onSave={reschedule} />}
       {task.status === "scheduled" && <button disabled={actionBusy} onClick={() => void control("start")}>Start now</button>}
-      {task.status === "paused" && <ResumeControl disabled={actionBusy} onResume={resume} />}
+      {(task.status === "paused" || task.status === "failed") && <ResumeControl retry={task.status === "failed"} disabled={actionBusy} onResume={resume} />}
       {canCancel && <DeleteConfirm
         triggerLabel="Cancel task"
         triggerClassName="danger"
@@ -224,6 +224,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
     {task.selectedPaths && <FileTree title="Selected source files" files={task.selectedPaths.map((path) => ({ path }))} />}
 
     {task.error && <div className="error-box">{task.error}</div>}
+    {task.status === "failed" && <p className="muted">Available downloaded data is retained. Retry continues using the locked revision. Delete task permanently removes the retained data.</p>}
     {error && <div className="error-box">{error}</div>}
     {task.artifactId && <div className="task-published"><span>Published artifact</span><code>{task.artifactId}</code></div>}
     {task.status === "awaiting_confirmation" && <Confirmation task={task} onConfirmed={setTask} />}

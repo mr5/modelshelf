@@ -222,14 +222,14 @@ func prepareStaging(staging string, wanted stagingState) error {
 		if json.Unmarshal(data, &current) == nil && current == wanted {
 			return nil
 		}
-		if err := RemoveTree(staging); err != nil {
-			return fmt.Errorf("reset incompatible staging tree: %w", err)
+		if err := quarantineStaging(staging); err != nil {
+			return fmt.Errorf("retain incompatible staging tree: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read staging state: %w", err)
 	} else if _, statErr := os.Lstat(staging); statErr == nil {
-		if err := RemoveTree(staging); err != nil {
-			return fmt.Errorf("reset unrecognized staging tree: %w", err)
+		if err := quarantineStaging(staging); err != nil {
+			return fmt.Errorf("retain unrecognized staging tree: %w", err)
 		}
 	}
 	if err := os.MkdirAll(filepath.Join(staging, ".modelshelf"), 0o755); err != nil {
@@ -238,6 +238,18 @@ func prepareStaging(staging string, wanted stagingState) error {
 	if err := writeAtomicJSON(statePath, wanted); err != nil {
 		return fmt.Errorf("write staging state: %w", err)
 	}
+	return nil
+}
+
+func quarantineStaging(staging string) error {
+	retained, err := os.MkdirTemp(filepath.Dir(staging), ".retained-*")
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(staging, filepath.Join(retained, "data")); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Retained previous staging data at %s\n", retained)
 	return nil
 }
 

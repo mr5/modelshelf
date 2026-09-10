@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1360,6 +1361,7 @@ async def _isolated_download(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
         env=_download_worker_environment(
             provider,
             direct=direct,
@@ -1371,13 +1373,13 @@ async def _isolated_download(
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
-    process.stdin.write(json.dumps(payload).encode())
-    await process.stdin.drain()
-    process.stdin.close()
     stderr_task = asyncio.create_task(process.stderr.read())
     final: dict[str, Any] | None = None
     stderr = b""
     try:
+        process.stdin.write(json.dumps(payload).encode())
+        await process.stdin.drain()
+        process.stdin.close()
         while line := await process.stdout.readline():
             decoded = line.decode().strip()
             if not decoded.startswith(_WORKER_PREFIX):
@@ -1395,18 +1397,13 @@ async def _isolated_download(
                 final = record
         await process.wait()
         stderr = await stderr_task
-    except asyncio.CancelledError:
-        if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
+    finally:
+        # The worker can spawn git, git-lfs and SDK helpers. Reap the whole
+        # session before allowing a retry or any explicit staging cleanup.
+        await _stop_provider_process(process)
         stderr_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await stderr_task
-        raise
     if final and final.get("type") == "error":
         raise _worker_error(final)
     if process.returncode != 0 or not final or final.get("type") != "result":
@@ -1423,6 +1420,27 @@ async def _isolated_download(
         else None,
         reuse_stats=ReuseStats.from_dict(result.get("reuseStats")),
     )
+
+
+async def _stop_provider_process(process: asyncio.subprocess.Process) -> None:
+    if os.name == "posix":
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+    elif process.returncode is None:
+        process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except TimeoutError:
+        pass
+    finally:
+        # A terminated worker may already have exited while its descendants
+        # still hold files open; returncode alone cannot prove they stopped.
+        if os.name == "posix":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            process.kill()
+        await process.wait()
 
 
 async def estimate_download(
@@ -1543,17 +1561,16 @@ async def download_huggingface(
             else None,
         )
 
-    try:
-        await _blocking_download(
-            operation,
-            destination,
-            progress,
-            total_bytes=known_total,
-            report_final=False,
-        )
-    finally:
-        shutil.rmtree(cache, ignore_errors=True)
-        shutil.rmtree(destination / ".cache" / "huggingface", ignore_errors=True)
+    await _blocking_download(
+        operation,
+        destination,
+        progress,
+        total_bytes=known_total,
+        report_final=False,
+    )
+    # SDK metadata inside the worktree is not artifact content. The task's
+    # remaining cache is retained until publication succeeds.
+    shutil.rmtree(destination / ".cache" / "huggingface", ignore_errors=True)
     final_size = _directory_size(destination)
     await progress(final_size, known_total if known_total is not None else final_size)
     return ProviderResult(resolved_revision=resolved)
@@ -1571,94 +1588,31 @@ async def download_modelscope(
     selected_paths: list[str] | None = None,
     reusable_artifact_roots: list[Path] | None = None,
 ) -> ProviderResult:
-    resolved = await _resolve_modelscope_revision(
+    resolved = expected_resolved_revision or await _resolve_modelscope_revision(
         provider, source_id, revision, endpoint=endpoint, token=token
     )
-    if expected_resolved_revision and resolved != expected_resolved_revision:
-        raise RuntimeError(
-            "ModelScope requested revision changed after preflight: "
-            f"expected {expected_resolved_revision}, got {resolved}"
-        )
     expected_sha256: dict[str, str] | None = None
     fetched_paths: list[str] | None = None
     reuse_stats: ReuseStats | None = None
-    if selected_paths and not reusable_artifact_roots:
-        await _download_modelscope_selected(
-            source_id,
-            revision,
-            destination,
-            progress,
-            endpoint,
-            token,
-            selected_paths,
-        )
-        resolved_after_download = await _resolve_modelscope_revision(
-            provider, source_id, revision, endpoint=endpoint, token=token
-        )
-        if resolved_after_download != resolved:
-            raise RuntimeError(
-                "ModelScope requested revision changed during the selected-file download: "
-                f"expected {resolved}, got {resolved_after_download}"
-            )
-    else:
-        git_result = await _download_modelscope_git(
-            source_id,
-            revision,
-            resolved,
-            destination,
-            progress,
-            endpoint,
-            token,
-            selected_paths=selected_paths,
-            reusable_artifact_roots=reusable_artifact_roots,
-        )
-        if isinstance(git_result, ModelScopeGitResult):
-            expected_sha256 = git_result.expected_sha256
-            fetched_paths = git_result.fetched_paths
-            reuse_stats = git_result.reuse_stats
-        else:  # supports tests/extensions replacing this private helper
-            expected_sha256, fetched_paths = cast(
-                tuple[dict[str, str], list[str]], git_result
-            )
+    # Git accepts immutable commits for full and selected downloads. Keep the
+    # mutable user label only in the task/manifest, never in a transfer request.
+    git_result = await _download_modelscope_git(
+        source_id, resolved, resolved, destination, progress, endpoint, token,
+        selected_paths=selected_paths,
+        reusable_artifact_roots=reusable_artifact_roots,
+    )
+    if isinstance(git_result, ModelScopeGitResult):
+        expected_sha256 = git_result.expected_sha256
+        fetched_paths = git_result.fetched_paths
+        reuse_stats = git_result.reuse_stats
+    else:  # supports tests/extensions replacing this private helper
+        expected_sha256, fetched_paths = cast(tuple[dict[str, str], list[str]], git_result)
     return ProviderResult(
         resolved_revision=resolved,
         expected_sha256=expected_sha256,
         fetched_paths=fetched_paths,
         reuse_stats=reuse_stats,
     )
-
-
-async def _download_modelscope_selected(
-    source_id: str,
-    revision: str,
-    destination: Path,
-    progress: Progress,
-    endpoint: str,
-    token: str | None,
-    selected_paths: list[str],
-) -> None:
-    try:
-        from modelscope_hub.compat import snapshot_download
-    except ImportError as error:
-        raise _optional_import_error("ModelScope", "modelscope-hub", error) from error
-    cache = destination.parent / ".modelscope-cache"
-
-    def operation() -> str:
-        return snapshot_download(
-            repo_id=source_id,
-            repo_type="model",
-            revision=revision,
-            local_dir=str(destination),
-            cache_dir=str(cache),
-            allow_patterns=[glob.escape(path) for path in selected_paths],
-            token=token,
-            endpoint=endpoint,
-        )
-
-    try:
-        await _blocking_download(operation, destination, progress)
-    finally:
-        shutil.rmtree(cache, ignore_errors=True)
 
 
 async def _download_modelscope_git(
@@ -1813,7 +1767,8 @@ async def _download_modelscope_git(
             ):
                 with contextlib.suppress(OSError):
                     path.rmdir()
-        shutil.rmtree(destination / ".git")
+        # The task moves Git metadata out of the worktree only after durably
+        # saving the provider result. A crash here must remain resumable.
         return str(destination)
 
     def download_size(root: Path) -> int:
@@ -1934,13 +1889,19 @@ def _try_resume_modelscope_git_checkout(
     token: str | None,
 ) -> dict[str, str] | None:
     git_directory = destination / ".git"
+    if not destination.exists() or (
+        destination.is_dir() and not destination.is_symlink() and not any(destination.iterdir())
+    ):
+        return None
     if (
         not destination.is_dir()
         or destination.is_symlink()
         or not git_directory.is_dir()
         or git_directory.is_symlink()
     ):
-        return None
+        raise ProviderRequestError(
+            f"Unrecognized ModelScope staging data retained at {destination}"
+        )
 
     environment = _modelscope_git_environment(token, skip_lfs=True)
     expected_remote = f"{endpoint.rstrip('/')}/{source_id}.git"
@@ -1953,12 +1914,26 @@ def _try_resume_modelscope_git_checkout(
             ["git", "-C", str(destination), "config", "--get", "remote.origin.url"],
             environment,
         )
-        head = _checked_modelscope_git(
-            ["git", "-C", str(destination), "rev-parse", "HEAD^{commit}"],
-            environment,
-        )
-        if inside_worktree != "true" or remote != expected_remote or head != resolved_revision:
-            return None
+        if inside_worktree != "true" or remote != expected_remote:
+            raise ProviderRequestError("ModelScope staging remote does not match the locked source")
+        try:
+            head = _checked_modelscope_git(
+                ["git", "-C", str(destination), "rev-parse", "HEAD^{commit}"],
+                environment,
+            )
+        except ProviderRequestError:
+            # An interrupted initial fetch may leave an initialized repository
+            # without HEAD. Fetch the same commit into it without deleting it.
+            _checked_modelscope_git(
+                ["git", "-C", str(destination), "fetch", "--depth=1", "origin", resolved_revision],
+                environment,
+            )
+            head = _checked_modelscope_git(
+                ["git", "-C", str(destination), "rev-parse", "FETCH_HEAD^{commit}"],
+                environment,
+            )
+        if head != resolved_revision:
+            raise ProviderRequestError("ModelScope staging commit does not match the locked source")
 
         # Force every tracked file back through the checkout filter with smudging
         # disabled. This restores LFS pointers for discovery while retaining the
@@ -1980,8 +1955,10 @@ def _try_resume_modelscope_git_checkout(
             ["git", "-C", str(destination), "checkout-index", "--all", "--force"],
             environment,
         )
-    except (OSError, ProviderRequestError):
-        return None
+    except (OSError, ProviderRequestError) as error:
+        raise ProviderRequestError(
+            f"ModelScope staging retained at {destination}; resume validation failed: {error}"
+        ) from error
     return environment
 
 
@@ -2038,18 +2015,22 @@ def _prepare_modelscope_git_checkout(
         raise ProviderUnavailable("ModelScope Git metadata lookup requires git")
     remote = f"{endpoint.rstrip('/')}/{source_id}.git"
     errors: list[ProviderRequestError] = []
+    if destination.is_symlink() or (destination.exists() and any(destination.iterdir())):
+        raise ProviderRequestError(f"Existing ModelScope staging data retained at {destination}")
+    destination.mkdir(parents=True, exist_ok=True)
+    _checked_modelscope_git(
+        ["git", "init", "--quiet", str(destination)],
+        _modelscope_git_environment(token, skip_lfs=skip_lfs),
+    )
     for attempt_token in (None, token) if token else (None,):
-        shutil.rmtree(destination, ignore_errors=True)
-        destination.mkdir(parents=True)
         environment = _modelscope_git_environment(attempt_token, skip_lfs=skip_lfs)
         try:
-            _checked_modelscope_git(["git", "init", "--quiet", str(destination)], environment)
             _checked_modelscope_git(
-                ["git", "-C", str(destination), "remote", "add", "origin", remote],
+                ["git", "-C", str(destination), "config", "remote.origin.url", remote],
                 environment,
             )
             _checked_modelscope_git(
-                ["git", "-C", str(destination), "fetch", "--depth=1", "origin", revision],
+                ["git", "-C", str(destination), "fetch", "--depth=1", "origin", resolved_revision],
                 environment,
             )
             fetched = _checked_modelscope_git(
@@ -2058,7 +2039,7 @@ def _prepare_modelscope_git_checkout(
             )
             if fetched != resolved_revision:
                 raise RuntimeError(
-                    "ModelScope requested revision changed before download: "
+                    "ModelScope fetched content does not match the locked commit: "
                     f"expected {resolved_revision}, got {fetched}"
                 )
             _checked_modelscope_git(
@@ -2238,17 +2219,14 @@ async def download_kaggle(
 
     def operation() -> str:
         with _temporary_environment("KAGGLEHUB_CACHE", str(cache)):
-            return str(kagglehub.model_download(handle, force_download=True))
+            return str(kagglehub.model_download(handle, force_download=False))
 
-    try:
-        downloaded = Path(await _blocking_download(operation, cache, progress))
-        match = re.search(r"[/\\]versions[/\\](\d+)(?:[/\\]|$)", str(downloaded))
-        resolved = revision if revision.isdigit() else (match.group(1) if match else "")
-        if not resolved:
-            raise RuntimeError("Kaggle SDK did not expose the resolved immutable model version")
-        shutil.copytree(downloaded, destination, dirs_exist_ok=True)
-    finally:
-        shutil.rmtree(cache, ignore_errors=True)
+    downloaded = Path(await _blocking_download(operation, cache, progress))
+    match = re.search(r"[/\\]versions[/\\](\d+)(?:[/\\]|$)", str(downloaded))
+    resolved = revision if revision.isdigit() else (match.group(1) if match else "")
+    if not resolved:
+        raise RuntimeError("Kaggle SDK did not expose the resolved immutable model version")
+    shutil.copytree(downloaded, destination, dirs_exist_ok=True)
     await progress(_directory_size(destination), _directory_size(destination))
     return ProviderResult(resolved_revision=f"version:{resolved}")
 

@@ -51,6 +51,26 @@ class VerificationError(RuntimeError):
     pass
 
 
+def remove_staging_tree(path: Path, staging_root: Path, *, reason: str) -> None:
+    """Remove a task-owned tree only after explicit discard or successful publication."""
+    root = staging_root.resolve()
+    candidate = path.resolve()
+    if candidate == root or root not in candidate.parents:
+        raise VerificationError(f"refusing cleanup outside staging: {path}")
+    if path.is_symlink() or candidate != path.absolute():
+        raise VerificationError(f"refusing cleanup through a symlink: {path}")
+    if not path.exists():
+        return
+    size = sum(
+        (Path(current) / name).lstat().st_size
+        for current, _directories, files in os.walk(path, followlinks=False)
+        for name in files
+    )
+    logger.info("Removing staging path=%s reason=%s logical_bytes=%d", path, reason, size)
+    _unfreeze_tree(path)
+    shutil.rmtree(path)
+
+
 def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -199,11 +219,14 @@ def clone_artifact_file(
     # support block cloning.
     try:
         os.link(source, destination)
+    except FileExistsError:
+        raise
     except OSError:
-        destination.unlink(missing_ok=True)
+        pass
     else:
         return "hardlink"
 
+    created = False
     try:
         source_descriptor = os.open(source, os.O_RDONLY)
         try:
@@ -212,6 +235,7 @@ def clone_artifact_file(
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                 source.stat().st_mode & 0o777,
             )
+            created = True
             try:
                 fcntl.ioctl(destination_descriptor, _FICLONE, source_descriptor)
             finally:
@@ -219,13 +243,18 @@ def clone_artifact_file(
         finally:
             os.close(source_descriptor)
     except OSError:
-        destination.unlink(missing_ok=True)
+        if created:
+            destination.unlink(missing_ok=True)
+        elif destination.exists() or destination.is_symlink():
+            raise
     else:
         return "reflink"
 
+    created = False
     try:
         digest = hashlib.sha256()
         with source.open("rb") as source_stream, destination.open("xb") as destination_stream:
+            created = True
             while block := source_stream.read(1024 * 1024):
                 destination_stream.write(block)
                 digest.update(block)
@@ -236,7 +265,8 @@ def clone_artifact_file(
                 f"expected {expected_sha256}, got {digest.hexdigest()}"
             )
     except (OSError, VerificationError):
-        destination.unlink(missing_ok=True)
+        if created:
+            destination.unlink(missing_ok=True)
         raise
     return "copy"
 
@@ -255,7 +285,8 @@ def _unfreeze_tree(root: Path) -> None:
     for current, directories, _files in os.walk(root):
         os.chmod(current, 0o755)
         for name in directories:
-            os.chmod(Path(current) / name, 0o755)
+            if not (Path(current) / name).is_symlink():
+                os.chmod(Path(current) / name, 0o755)
 
 
 def _artifact_manifest_paths(root: Path) -> Iterator[Path]:
@@ -335,6 +366,8 @@ class Catalog:
         self.reconcile_index()
 
     def staging_path(self, task_id: str) -> Path:
+        if not task_id or task_id in {".", ".."} or Path(task_id).name != task_id:
+            raise ValueError("invalid staging task ID")
         return self.staging_root / task_id
 
     def artifact_path(

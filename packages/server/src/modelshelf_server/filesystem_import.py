@@ -182,6 +182,10 @@ def import_filesystem(
             ),
         )
         destination, deduplicated = catalog.publish(publish_root, manifest)
-        return FilesystemImportResult(manifest, destination, deduplicated)
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
+        result = FilesystemImportResult(manifest, destination, deduplicated)
+    except BaseException as error:
+        error.add_note(f"Import staging data retained at {stage}")
+        raise
+    else:
+        shutil.rmtree(stage)
+        return result

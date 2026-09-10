@@ -219,6 +219,37 @@ func TestSyncRetainsCompletedStagingFilesAfterFailure(t *testing.T) {
 	}
 }
 
+func TestUnrecognizedStagingIsRetained(t *testing.T) {
+	for _, stateContents := range []string{"", "broken JSON", `{"schemaVersion":1,"artifactId":"old"}`} {
+		t.Run(stateContents, func(t *testing.T) {
+			root := t.TempDir()
+			stage := filepath.Join(root, "sync-test")
+			if err := os.MkdirAll(filepath.Join(stage, ".modelshelf"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(stage, "model.bin"), []byte("valuable"), 0o444); err != nil {
+				t.Fatal(err)
+			}
+			if stateContents != "" {
+				if err := os.WriteFile(filepath.Join(stage, ".modelshelf", "staging.json"), []byte(stateContents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := prepareStaging(stage, stagingState{SchemaVersion: 1, ArtifactID: "new", ContentSHA256: "digest"}); err != nil {
+				t.Fatal(err)
+			}
+			matches, err := filepath.Glob(filepath.Join(root, ".retained-*", "data", "model.bin"))
+			if err != nil || len(matches) != 1 {
+				t.Fatalf("expected retained data: %v %v", matches, err)
+			}
+			data, err := os.ReadFile(matches[0])
+			if err != nil || string(data) != "valuable" {
+				t.Fatalf("retained content lost: %q %v", data, err)
+			}
+		})
+	}
+}
+
 func TestSelectArtifactRequiresRequestedRevisionOrPin(t *testing.T) {
 	now := time.Now()
 	artifacts := []domain.ArtifactSummary{

@@ -9,9 +9,11 @@ function localDateTimeValue(date: Date): string {
 export function ResumeControl({
   disabled = false,
   onResume,
+  retry = false,
 }: {
   disabled?: boolean;
   onResume: (scheduledAt?: string) => Promise<boolean>;
+  retry?: boolean;
 }) {
   const titleId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -108,7 +110,7 @@ export function ResumeControl({
       aria-haspopup="dialog"
       aria-expanded={open}
       onClick={() => setOpen((current) => !current)}
-    >Resume</button>
+    >{retry ? "Retry" : "Resume"}</button>
     {open && createPortal(<div
       ref={popoverRef}
       className="resume-popover"
@@ -118,8 +120,8 @@ export function ResumeControl({
       style={{ left: position.left, top: position.top }}
     >
       <div className="resume-popover-copy">
-        <strong id={titleId}>Resume task</strong>
-        <p>Continue from the downloaded staging data now, or at a specific time.</p>
+        <strong id={titleId}>{retry ? "Retry task" : "Resume task"}</strong>
+        <p>Continue from retained data using the same locked revision, now or at a specific time.</p>
       </div>
       <label className="resume-popover-option">
         <input type="checkbox" checked={delayed} disabled={busy} onChange={(event) => {

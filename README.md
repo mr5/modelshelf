@@ -116,6 +116,11 @@ The task form searches model IDs, discovers revisions, runs an authenticated pre
 the resolved immutable revision, estimated size/file count, metadata, and source page before the
 task can be saved. Manual IDs and revisions use the same validation.
 
+Failed downloads retain their staging files and SDK/LFS caches. Use **Retry** to continue the
+same task at its locked commit, even if the upstream branch has moved. Pause and shutdown stop
+the provider process group. Staging is discarded only after successful publication or explicit
+task cancellation/deletion; unrecognized ModelScope staging is preserved and reported as an error.
+
 Downloads expose transferred bytes, current/average speed, and ETA. They can be paused, resumed
 immediately or at a later time, and cancelled. A task can lock its immutable revision immediately
 and defer entering the download queue until a one-time UTC timestamp. Scheduled starts and resumes

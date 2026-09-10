@@ -297,7 +297,7 @@ def test_modelscope_revision_resolution_uses_token_after_anonymous_failure(
     assert "private-token" not in " ".join(str(argument) for argument in calls[1][0])
 
 
-def test_modelscope_download_uses_requested_revision_and_verifies_immutable_commit(
+def test_modelscope_download_uses_locked_immutable_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     resolved = "e823e888ae179eb3be02c1a48899c4f828371376"
@@ -337,12 +337,12 @@ def test_modelscope_download_uses_requested_revision_and_verifies_immutable_comm
     assert result.resolved_revision == resolved
     assert captured == {
         "source_id": "Qwen/Qwen3.8-27B",
-        "revision": "master",
+        "revision": resolved,
         "resolved": resolved,
     }
 
 
-def test_modelscope_download_rejects_a_revision_that_moves_during_download(
+def test_modelscope_download_keeps_old_commit_when_branch_moves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     before = "a" * 40
@@ -353,8 +353,12 @@ def test_modelscope_download_rejects_a_revision_that_moves_during_download(
 
     monkeypatch.setattr(provider_module, "_resolve_modelscope_revision", resolve)
 
-    with pytest.raises(RuntimeError, match="changed after preflight"):
-        asyncio.run(
+    async def download(*args: object, **_kwargs: object) -> tuple[dict[str, str], list[str]]:
+        assert args[1:3] == (before, before)
+        return {}, []
+
+    monkeypatch.setattr(provider_module, "_download_modelscope_git", download)
+    result = asyncio.run(
             provider_module.download_modelscope(
                 Provider.MODELSCOPE_CN,
                 "owner/model",
@@ -365,10 +369,11 @@ def test_modelscope_download_rejects_a_revision_that_moves_during_download(
                 None,
                 before,
             )
-        )
+    )
+    assert result.resolved_revision == before
 
 
-def test_modelscope_selected_download_uses_requested_revision_and_checks_it_again(
+def test_modelscope_selected_download_uses_locked_commit_without_resolving_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     resolved = "c" * 40
@@ -380,16 +385,19 @@ def test_modelscope_selected_download_uses_requested_revision_and_checks_it_agai
         resolutions += 1
         return resolved
 
-    async def selected_download(*args: object) -> None:
+    async def selected_download(
+        *args: object, **kwargs: object
+    ) -> tuple[dict[str, str], list[str]]:
         captured["revision"] = args[1]
-        captured["selected_paths"] = args[-1]
-        destination = args[2]
+        captured["selected_paths"] = kwargs["selected_paths"]
+        destination = args[3]
         assert isinstance(destination, Path)
         destination.mkdir(parents=True, exist_ok=True)
         (destination / "model.gguf").write_bytes(b"model")
+        return {}, []
 
     monkeypatch.setattr(provider_module, "_resolve_modelscope_revision", resolve)
-    monkeypatch.setattr(provider_module, "_download_modelscope_selected", selected_download)
+    monkeypatch.setattr(provider_module, "_download_modelscope_git", selected_download)
 
     result = asyncio.run(
         provider_module.download_modelscope(
@@ -406,8 +414,8 @@ def test_modelscope_selected_download_uses_requested_revision_and_checks_it_agai
     )
 
     assert result.resolved_revision == resolved
-    assert resolutions == 2
-    assert captured == {"revision": "master", "selected_paths": ["model.gguf"]}
+    assert resolutions == 0
+    assert captured == {"revision": resolved, "selected_paths": ["model.gguf"]}
 
 
 def test_modelscope_git_estimate_uses_lfs_object_sizes(
@@ -685,7 +693,7 @@ def test_modelscope_git_download_defers_lfs_integrity_to_manifest_hashing(
     assert expected == {"model.bin": oid}
     assert fetched == ["model.bin"]
     assert len(commands) == 1
-    assert not (destination / ".git").exists()
+    assert (destination / ".git").exists()
 
 
 def test_modelscope_git_checkout_resumes_matching_stage(
@@ -765,7 +773,7 @@ def test_modelscope_git_checkout_rejects_mismatched_stage(
 
     monkeypatch.setattr(provider_module, "_checked_modelscope_git", fake_git)
 
-    assert (
+    with pytest.raises(provider_module.ProviderRequestError, match="staging retained"):
         provider_module._try_resume_modelscope_git_checkout(
             "owner/model",
             "a" * 40,
@@ -773,8 +781,7 @@ def test_modelscope_git_checkout_rejects_mismatched_stage(
             "https://modelscope.test",
             None,
         )
-        is None
-    )
+    assert (destination / ".git").is_dir()
 
 
 def test_modelscope_lfs_resume_promotes_largest_matching_partial(tmp_path: Path) -> None:
@@ -862,7 +869,7 @@ def test_modelscope_git_download_preserves_partial_lfs_object_when_resuming(
     assert result.expected_sha256 == {"model.bin": oid}
     assert result.fetched_paths == ["model.bin"]
     assert (destination / "model.bin").read_bytes() == payload
-    assert not (destination / ".git").exists()
+    assert (destination / ".git").exists()
 
 
 def test_modelscope_git_download_reuses_matching_lfs_files_from_any_prior_selection(
@@ -979,7 +986,7 @@ def test_kaggle_latest_is_resolved_from_official_cache_path(
 
     def fake_download(handle: str, *, force_download: bool) -> str:
         assert handle == "owner/model/framework/variation"
-        assert force_download
+        assert not force_download
         return str(cached)
 
     monkeypatch.setattr(kagglehub, "model_download", fake_download)

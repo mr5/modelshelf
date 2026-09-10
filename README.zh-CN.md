@@ -122,6 +122,11 @@ Hub 搜索、revision 查询和 preflight 默认最多等待 30 秒，超时返�
 实际下载使用的环境变量镜像。ModelScope CN 和 AI 是两个独立 source，使用不同地址和 token，
 互相不是 mirror 或认证 fallback。
 
+下载失败会保留 staging 和 SDK/LFS 缓存，可通过 **Retry** 按锁定的提交继续；上游分支更新不会
+改变任务版本。暂停或关闭服务会终止整个下载进程组。暂存数据仅在发布成功或用户明确取消、
+删除任务后清理。无法识别的 ModelScope 暂存目录会保留并报错；客户端不兼容的同步暂存会移动到
+`.retained-*/data` 保存。
+
 Generic HTTP 使用两阶段流程：先将 URL 下载到 staging 并推断元信息，再由管理员明确选择是否
 解包并确认发布。URL 文本不作为 artifact identity，实际下载内容的摘要才是最终 identity。
 

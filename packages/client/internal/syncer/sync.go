@@ -20,6 +20,7 @@ import (
 	"github.com/mr5/modelshelf/client/internal/catalog"
 	"github.com/mr5/modelshelf/client/internal/config"
 	"github.com/mr5/modelshelf/client/internal/domain"
+	"github.com/mr5/modelshelf/client/internal/nfsio"
 )
 
 type directoryMode struct {
@@ -28,6 +29,7 @@ type directoryMode struct {
 }
 
 type copyJob struct {
+	ctx         context.Context
 	source      string
 	destination string
 	mode        os.FileMode
@@ -98,7 +100,7 @@ func One(
 			"artifact is not available: %s:%s", desired.Provider, desired.ID,
 		)
 	}
-	return SyncArtifact(ctx, configuration, desired, *artifact)
+	return SyncConfigured(ctx, configuration, client, desired, *artifact, io.Discard)
 }
 
 func SyncArtifact(
@@ -124,7 +126,7 @@ func SyncArtifact(
 				destination, current.ArtifactID, artifact.ArtifactID,
 			)
 		}
-		failures, verifyErr := catalog.Verify(destination, catalog.VerifyOptions{})
+		failures, verifyErr := catalog.Verify(destination, catalog.VerifyOptions{Full: true})
 		if verifyErr == nil && len(failures) == 0 {
 			if err := EnsureReferences(configuration, desired, destination); err != nil {
 				return domain.ArtifactSummary{}, err
@@ -137,26 +139,23 @@ func SyncArtifact(
 		return domain.ArtifactSummary{}, err
 	}
 	source := filepath.Join(configuration.NFSLocalPath, relative)
-	info, err := os.Stat(source)
+	info, err := nfsio.Stat(source)
 	if err != nil || !info.IsDir() {
 		if err == nil {
 			err = errors.New("not a directory")
 		}
-		return domain.ArtifactSummary{}, fmt.Errorf("NFS artifact is not visible at %s: %w", source, err)
+		return domain.ArtifactSummary{}, sourceError(fmt.Errorf("NFS artifact is not visible at %s: %w", source, err))
 	}
 	stagingParent := config.StagingRoot(configuration)
 	if err := os.MkdirAll(stagingParent, 0o755); err != nil {
 		return domain.ArtifactSummary{}, fmt.Errorf("create staging directory: %w", err)
 	}
-	manifest, err := catalog.ReadManifest(source)
+	manifest, err := nfsio.Metadata(func() (domain.ArtifactManifest, error) { return catalog.ReadManifest(source) })
 	if err != nil {
-		return domain.ArtifactSummary{}, err
+		return domain.ArtifactSummary{}, sourceError(err)
 	}
 	if manifest.ArtifactID != artifact.ArtifactID {
-		return domain.ArtifactSummary{}, fmt.Errorf(
-			"NFS manifest identity mismatch: got %s, expected %s",
-			manifest.ArtifactID, artifact.ArtifactID,
-		)
+		return domain.ArtifactSummary{}, sourceError(fmt.Errorf("NFS manifest identity mismatch: got %s, expected %s", manifest.ArtifactID, artifact.ArtifactID))
 	}
 	stageDigest := sha256.Sum256([]byte(artifact.ArtifactID))
 	staging := filepath.Join(stagingParent, fmt.Sprintf("sync-%x", stageDigest[:]))
@@ -179,22 +178,24 @@ func SyncArtifact(
 	if err := os.Chmod(metadataDirectory, 0o755); err != nil {
 		return domain.ArtifactSummary{}, fmt.Errorf("make metadata directory writable: %w", err)
 	}
-	if err := copyManifest(source, staging); err != nil {
+	if err := writeAtomicJSON(filepath.Join(staging, catalog.ManifestPath), manifest); err != nil {
 		return domain.ArtifactSummary{}, err
 	}
-	failures, err := catalog.Verify(staging, catalog.VerifyOptions{})
+	if err := os.Chmod(filepath.Join(staging, catalog.ManifestPath), 0444); err != nil {
+		return domain.ArtifactSummary{}, err
+	}
+	failures, err := catalog.Verify(staging, catalog.VerifyOptions{Full: true})
 	if err != nil {
 		return domain.ArtifactSummary{}, err
 	}
 	if len(failures) != 0 {
-		return domain.ArtifactSummary{}, fmt.Errorf(
-			"quick verification failed: %s", strings.Join(failures, "; "),
-		)
+		return domain.ArtifactSummary{}, sourceError(fmt.Errorf("verification failed: %s", strings.Join(failures, "; ")))
 	}
 	syncState := map[string]any{
 		"schemaVersion": 1,
 		"artifactId":    artifact.ArtifactID,
 		"serverUrl":     configuration.ServerURL,
+		"sourcePath":    source,
 		"syncedAt":      time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if err := writeAtomicJSON(filepath.Join(metadataDirectory, "sync.json"), syncState); err != nil {
@@ -319,6 +320,14 @@ func materializeManifest(
 	jobs := []copyJob{}
 	seenDirectories := map[string]struct{}{}
 	for _, entry := range manifest.Files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for _, part := range strings.Split(entry.Path, "/") {
+			if part == ".modelshelf" {
+				return nil, sourceError(errors.New("manifest file uses reserved .modelshelf directory"))
+			}
+		}
 		target := filepath.Join(destination, filepath.FromSlash(entry.Path))
 		parent := filepath.Dir(target)
 		if _, seen := seenDirectories[parent]; !seen {
@@ -330,19 +339,29 @@ func materializeManifest(
 		}
 		if info, err := os.Lstat(target); err == nil && info.Mode().IsRegular() &&
 			info.Size() == entry.Size {
-			continue
+			if digest, e := catalog.SHA256File(target); e == nil && digest == entry.SHA256 {
+				continue
+			}
+			_ = os.Remove(target)
 		} else if err == nil || !errors.Is(err, os.ErrNotExist) {
 			_ = os.Remove(target)
 		}
 		if candidate, ok := reusable[reusableKey(entry)]; ok {
-			if err := os.Link(candidate.path, target); err == nil {
-				continue
+			if digest, e := catalog.SHA256File(candidate.path); e != nil || digest != entry.SHA256 {
+				delete(reusable, reusableKey(entry))
+			} else {
+				if err := os.Link(candidate.path, target); err == nil {
+					continue
+				}
+				_ = os.Remove(target)
 			}
-			_ = os.Remove(target)
 		}
-		info, err := os.Stat(filepath.Join(source, filepath.FromSlash(entry.Path)))
+		info, err := nfsio.Lstat(filepath.Join(source, filepath.FromSlash(entry.Path)))
 		if err != nil {
-			return nil, fmt.Errorf("inspect NFS file %s: %w", entry.Path, err)
+			return nil, sourceError(fmt.Errorf("inspect NFS file %s: %w", entry.Path, err))
+		}
+		if !info.Mode().IsRegular() || info.Size() != entry.Size {
+			return nil, sourceError(fmt.Errorf("NFS file type or size mismatch: %s", entry.Path))
 		}
 		jobs = append(jobs, copyJob{
 			source:      filepath.Join(source, filepath.FromSlash(entry.Path)),
@@ -573,6 +592,7 @@ func runCopyJobs(ctx context.Context, jobs []copyJob) error {
 				if workerContext.Err() != nil {
 					continue
 				}
+				job.ctx = workerContext
 				if err := copyFile(job, buffer); err != nil {
 					errorOnce.Do(func() {
 						firstError = err
@@ -602,9 +622,9 @@ sendLoop:
 }
 
 func copyFile(job copyJob, buffer []byte) error {
-	source, err := os.Open(job.source)
+	source, err := nfsio.Open(job.source)
 	if err != nil {
-		return fmt.Errorf("open source %s: %w", job.source, err)
+		return sourceError(fmt.Errorf("open source %s: %w", job.source, err))
 	}
 	defer source.Close()
 	temporaryPath := job.destination + ".modelshelf-part"
@@ -625,11 +645,11 @@ func copyFile(job copyJob, buffer []byte) error {
 	if job.expectedSHA != "" {
 		writer = io.MultiWriter(destination, digest)
 	}
-	if _, err := io.CopyBuffer(writer, source, buffer); err != nil {
+	if _, err := io.CopyBuffer(writer, sourceReader{Reader: source, ctx: job.ctx}, buffer); err != nil {
 		return fmt.Errorf("copy %s: %w", job.source, err)
 	}
 	if job.expectedSHA != "" && hex.EncodeToString(digest.Sum(nil)) != job.expectedSHA {
-		return fmt.Errorf("copy %s: SHA-256 does not match manifest", job.source)
+		return sourceError(fmt.Errorf("copy %s: SHA-256 does not match manifest", job.source))
 	}
 	if err := destination.Sync(); err != nil {
 		return fmt.Errorf("sync %s: %w", job.destination, err)

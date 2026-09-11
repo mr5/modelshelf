@@ -58,3 +58,13 @@ is rebuilt from manifests.
 Client config and lock files move from schema 1 to schema 2 with optional GGUF variant `files`. Config is
 normalized only in memory until the user performs a write. Generated v1 locks migrate losslessly;
 frozen mode still refuses any required lock rewrite.
+
+## Client distribution config version 3
+
+Client config v2 migrates in memory to v3, adding optional `upstream` (host, optional port and boolean fallback)
+and `distribution` (enabled, optional port and allowed CIDRs). Omitted upstream preserves central NFS discovery;
+fallback defaults to false. Both optional ports default to 2049 and validate explicit values in
+1–65535. Loading does not rewrite user YAML. Client lock schema remains v2,
+local layout remains v1, and published manifests retain their original schema. Distribution's
+`.distribution/published` is a retained projection of verified local artifacts, separate from its
+private staging directory. `sync.json` adds the observational `sourcePath` without changing identity.

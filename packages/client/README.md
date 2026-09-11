@@ -32,8 +32,7 @@ The default config is `~/.config/modelshelf/config.yml`; `MODELSHELF_CONFIG` ove
 `config.lock.yml`, never back into user configuration.
 
 `sync` preserves locked revisions, `sync --update` refreshes branches/tags, and
-`sync --frozen-lockfile` rejects required lock changes. Both YAML files currently use
-`schemaVersion: 2`; v1 files migrate losslessly, while an older client refuses a future lock
+`sync --frozen-lockfile` rejects required lock changes. Config uses `schemaVersion: 3`; lock files remain at version 2. Older supported files migrate losslessly, while an older client refuses a future lock
 instead of silently repinning a moving revision.
 
 Optional `artifact` references one published artifact by alias (preferred) or immutable artifact
@@ -83,3 +82,16 @@ Create all four release archives from the repository root with:
 ```bash
 ./scripts/package_client.sh
 ```
+
+## Client distribution
+
+A Linux client can publish completed models with `distribution.enabled: true` and an explicit
+`distribution.allow` CIDR list. Followers only need `upstream.host`; `upstream.fallback` is false
+unless explicitly enabled. Omitting upstream keeps the central server's NFS discovery behavior.
+
+See [English deployment guide](../../docs/client-distribution.md) or
+[中文部署指南](../../docs/client-distribution.zh-CN.md), including real NFS integration tests.
+
+Both `upstream.port` and `distribution.port` are optional and default to 2049 (valid range
+1–65535). The distribution service uses system-installed NFS-Ganesha; the CLI does not embed an
+NFS server. For direct peer connections, configure the same port on publisher and follower.

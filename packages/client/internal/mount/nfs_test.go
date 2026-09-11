@@ -1,6 +1,10 @@
 package mount
 
-import "testing"
+import (
+	"context"
+	"github.com/mr5/modelshelf/client/internal/config"
+	"testing"
+)
 
 func TestValidatedNFSVersion(t *testing.T) {
 	tests := []struct {
@@ -56,5 +60,32 @@ func TestValidateMountTargetRejectsUnitFileInjection(t *testing.T) {
 	}
 	if err := validateMountTarget("/mnt/modelshelf\nOptions=rw"); err == nil {
 		t.Fatal("target with newline was accepted")
+	}
+}
+
+func TestPeerPortResolutionAndMountedPort(t *testing.T) {
+	port := 12049
+	c := config.Config{Upstream: &config.Upstream{Host: "192.168.100.1", Port: &port}}
+	info, err := Resolve(context.Background(), c, nil)
+	if err != nil || info.NFS.Port != 12049 {
+		t.Fatalf("custom peer endpoint: %v %v", info, err)
+	}
+	c.Upstream.Port = nil
+	info, err = Resolve(context.Background(), c, nil)
+	if err != nil || info.NFS.Port != 2049 {
+		t.Fatalf("default peer endpoint: %v %v", info, err)
+	}
+	for _, test := range []struct {
+		options string
+		port    int
+		valid   bool
+	}{
+		{"ro,vers=4.1", 2049, true}, {"ro,port=0", 2049, true}, {"ro,port=12049", 12049, true},
+		{"ro,port=2049", 12049, false}, {"ro,port=12049", 2049, false},
+	} {
+		err := checkPort(test.options, test.port)
+		if (err == nil) != test.valid {
+			t.Fatalf("options=%s expected=%d err=%v", test.options, test.port, err)
+		}
 	}
 }

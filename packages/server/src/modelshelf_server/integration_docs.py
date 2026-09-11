@@ -102,7 +102,7 @@ spec:
     server: {host}
     path: {export_path}
     readOnly: true"""
-    config = f"""schemaVersion: 2
+    config = f"""schemaVersion: 3
 serverUrl: {server_base}
 nfsLocalPath: /mnt/modelshelf
 localBasePath: /var/lib/modelshelf
@@ -203,7 +203,8 @@ models:
         "network is unavailable. This line is also suitable for `/etc/fstab`.",
         _fence("fstab", fstab),
         "Unmount with `sudo umount /mnt/modelshelf`. The client CLI's `modelshelf mount` "
-        "command creates matching `.mount` and `.automount` units automatically.",
+        "command creates `.mount` and `.automount` units automatically; its copy-only mounts "
+        "use finite retries with full content verification.",
         "### Docker Compose with a host bind",
         "Recommended when the host already mounts ModelShelf.",
         _fence("yaml", compose_bind),
@@ -246,7 +247,13 @@ models:
         "Configuration fields:",
         "- `schemaVersion`: configuration schema understood by the CLI.",
         "- `serverUrl`: HTTP API used for discovery, search, task creation, and NFS lookup.",
-        "- `nfsLocalPath`: absolute path where the read-only server export is mounted.",
+        "- `nfsLocalPath`: optional local NFS mount point; defaults to `/mnt/modelshelf`.",
+        "- `upstream`: optional `{host: 192.168.100.1}` to read files from a publishing client. "
+        "Omit it to use the central server NFS endpoint. `fallback: true` explicitly permits "
+        "central fallback; the default is false. Optional `upstream.port` defaults to 2049.",
+        "- `distribution`: optional `{enabled: true, allow: [192.168.100.0/24]}` to publish "
+        "completed models from a Linux client through system-installed NFS-Ganesha. "
+        "Optional `distribution.port` defaults to 2049; the CLI does not embed an NFS server.",
         "- `localBasePath`: root containing canonical `models/` content and stable `aliases/` "
         "symlinks.",
         "- `writeToken`: optional CLI API token used to create missing server downloads or "
@@ -258,6 +265,28 @@ models:
         "and custom code file. The sorted set is part of artifact identity.",
         "- `alias`: optional globally unique CLI name and stable symlink.",
         "- `path`: optional additional symlink, relative to `localBasePath` or absolute.",
+        "### Multi-machine distribution",
+        "On publisher A, install `nfs-ganesha` and `nfs-ganesha-vfs`, set "
+        "`distribution.enabled: true` with an explicit `distribution.allow` CIDR list, then run "
+        "`modelshelf export plan`, `modelshelf export enable`, `modelshelf mount`, and "
+        "`modelshelf sync`. The chosen `distribution.port` (default 2049) must be free; "
+        "allow follower access on the "
+        "high-speed interface. "
+        "The dedicated Linux systemd service exports only "
+        "`<localBasePath>/.distribution/published` at `/modelshelf` using hardlinks "
+        "to verified files. "
+        "Private staging, aliases and tokens are not exported.",
+        "On followers, set `upstream.host` to A's high-speed IP and run `modelshelf mount` and "
+        "`modelshelf sync`. Set optional `upstream.port` to the publisher port "
+        "when it is not 2049. "
+        "Metadata still comes from `serverUrl`. Missing or unavailable peer "
+        "files fail by default. To opt into central fallback, add `upstream.fallback: true` and "
+        "run `modelshelf mount` again to prepare the separate `-fallback` mount. Fallback keeps "
+        "the same artifact and is reported explicitly. Local errors and cancellation do not "
+        "trigger fallback. Old published revisions remain after local model removal.",
+        "Linux managed mounts use finite NFS retries and SHA-256 verification. Unmount an old "
+        "`hard` mount before recreating it. Use local copies for inference. "
+        "`modelshelf export disable` stops the publisher service without deleting models.",
         "### Local storage layout",
         "Canonical model bytes and human-friendly references have separate roles below "
         "`localBasePath`. A branch or tag such as `main` is a sibling symlink to its locked "
@@ -282,7 +311,9 @@ models:
         "All commands accept `--config <path>`. Provider names are `huggingface`, "
         "`modelscope-cn`, `modelscope-ai`, `github-release`, `kaggle`, `http`, and "
         "`filesystem`.",
-        "- `modelshelf mount`: discover and mount the server NFS endpoint.",
+        "- `modelshelf mount`: mount the configured peer or the server-advertised NFS endpoint; "
+        "also prepare a separate fallback mount when explicitly enabled.",
+        "- `modelshelf export plan|enable|status|disable`: manage Linux client distribution.",
         "- `modelshelf unmount`: remove the configured mount and generated Linux systemd units.",
         "- `modelshelf add <provider> <model-id> [-r revision] [--artifact alias-or-id] "
         "[--file path] [--alias alias] [--path path]`: add desired state and sync it. "

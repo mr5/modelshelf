@@ -171,7 +171,7 @@ The default configuration path is `~/.config/modelshelf/config.yml` (override wi
 `MODELSHELF_CONFIG`):
 
 ```yaml
-schemaVersion: 2
+schemaVersion: 3
 serverUrl: http://modelshelf.internal:8080
 nfsLocalPath: /mnt/modelshelf
 localBasePath: /var/lib/modelshelf
@@ -238,6 +238,17 @@ or not configured. Linux mounting uses systemd NFSv4.1 automount and requires
 See [packages/client/README.md](packages/client/README.md) for client-only build and distribution
 details. Each deployment exposes the same generated integration guide at `/integration` for
 people and `/integration.md` as plain Markdown for agents.
+
+
+### Multi-machine client distribution
+
+Publish from a Linux client with `distribution: {enabled: true, allow: [192.168.100.0/24]}`;
+followers add `upstream: {host: 192.168.100.1}`. Without upstream, clients use the central server's
+advertised NFS endpoint. Peer failures are strict by default; only `upstream.fallback: true`
+permits central fallback. Run `modelshelf export enable` on the publisher, then use ordinary
+`mount` / `sync`. Completed artifacts are hardlinked into an isolated read-only export.
+
+See the [deployment guide](docs/client-distribution.md) for installation, configuration and failures.
 
 ## Storage layout and schema
 

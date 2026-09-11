@@ -90,6 +90,7 @@ func NewWithIO(version, commit string, stdin io.Reader, stdout, stderr io.Writer
 		application.statusCommand(),
 		application.verifyCommand(),
 		application.mountCommand(),
+		application.exportCommand(),
 		application.unmountCommand(),
 		application.upgradeCommand(),
 		application.hashPasswordCommand(),
@@ -1001,7 +1002,7 @@ func (application *Application) reconcileAndSync(
 		desired.ArtifactID = artifact.ArtifactID
 		desired.RelativePath = artifact.RelativePath
 		desired.Files = selectedFiles(desired, artifact)
-		result, syncErr := syncer.SyncArtifact(ctx, configuration, desired, artifact)
+		result, syncErr := syncer.SyncConfigured(ctx, configuration, client, desired, artifact, application.Stderr)
 		if syncErr != nil {
 			failures++
 			fmt.Fprintf(application.Stderr, "failed %s: %v\n", displayModel(desired), syncErr)

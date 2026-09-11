@@ -161,7 +161,7 @@ curl -fsSL https://raw.githubusercontent.com/mr5/modelshelf/main/packages/client
 默认配置文件是 `~/.config/modelshelf/config.yml`，可以通过 `MODELSHELF_CONFIG` 修改：
 
 ```yaml
-schemaVersion: 2
+schemaVersion: 3
 serverUrl: http://modelshelf.internal:8080
 nfsLocalPath: /mnt/modelshelf
 localBasePath: /var/lib/modelshelf
@@ -226,6 +226,17 @@ modelshelf upgrade [--check] [--github]
 
 客户端独立构建和发行细节见 [packages/client/README.md](packages/client/README.md)。每个部署会
 基于同一来源生成集成文档：`/integration` 面向用户，`/integration.md` 为 agent 提供纯 Markdown。
+
+
+### 多机客户端分发
+
+主客户端只需增加 `distribution: {enabled: true, allow: [192.168.100.0/24]}`，
+从客户端增加 `upstream: {host: 192.168.100.1}`。省略 upstream 时使用中央服务端下发的 NFS；
+指定上游后默认失败即报错，仅 `upstream.fallback: true` 显式允许回退中央服务端。
+主客户端通过 `modelshelf export enable` 启用只读服务，再使用普通 `mount` / `sync`。
+已完成模型以硬链接发布，临时文件和本机配置不导出。
+
+完整配置、安装和故障处理见 [多机部署指南](docs/client-distribution.zh-CN.md)。
 
 ## 服务端存储与 schema
 

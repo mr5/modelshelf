@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path"
@@ -19,16 +20,44 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type Upstream struct {
+	Host     string `yaml:"host"`
+	Port     *int   `yaml:"port,omitempty"`
+	Fallback bool   `yaml:"fallback,omitempty"`
+}
+
+func (u *Upstream) NFSPort() int {
+	if u == nil || u.Port == nil {
+		return 2049
+	}
+	return *u.Port
+}
+
+type Distribution struct {
+	Port    *int     `yaml:"port,omitempty"`
+	Enabled bool     `yaml:"enabled"`
+	Allow   []string `yaml:"allow,omitempty"`
+}
+
+func (d *Distribution) NFSPort() int {
+	if d == nil || d.Port == nil {
+		return 2049
+	}
+	return *d.Port
+}
+
 type Config struct {
 	SchemaVersion int                   `yaml:"schemaVersion"`
 	ServerURL     string                `yaml:"serverUrl"`
 	NFSLocalPath  string                `yaml:"nfsLocalPath"`
 	LocalBasePath string                `yaml:"localBasePath"`
 	WriteToken    string                `yaml:"writeToken,omitempty"`
+	Upstream      *Upstream             `yaml:"upstream,omitempty"`
+	Distribution  *Distribution         `yaml:"distribution,omitempty"`
 	Models        []domain.DesiredModel `yaml:"models,omitempty"`
 }
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 const CurrentLocalLayoutSchemaVersion = 1
 
@@ -116,7 +145,10 @@ func (config *Config) Validate() error {
 		config.SchemaVersion = 1
 	}
 	if config.SchemaVersion == 1 {
-		config.SchemaVersion = CurrentSchemaVersion
+		config.SchemaVersion = 2
+	}
+	if config.SchemaVersion == 2 {
+		config.SchemaVersion = 3
 	}
 	if config.SchemaVersion != CurrentSchemaVersion {
 		return fmt.Errorf(
@@ -142,6 +174,28 @@ func (config *Config) Validate() error {
 	}
 	if filepath.Clean(config.LocalBasePath) == string(filepath.Separator) {
 		return errors.New("localBasePath cannot be the filesystem root")
+	}
+	if config.Upstream != nil {
+		if port := config.Upstream.NFSPort(); port < 1 || port > 65535 {
+			return errors.New("upstream.port must be between 1 and 65535")
+		}
+		host := config.Upstream.Host
+		if host == "" || strings.HasPrefix(host, "-") || (net.ParseIP(host) == nil && !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`).MatchString(host)) {
+			return errors.New("upstream.host must be an IP address or hostname without a port or path")
+		}
+	}
+	if config.Distribution != nil {
+		if port := config.Distribution.NFSPort(); port < 1 || port > 65535 {
+			return errors.New("distribution.port must be between 1 and 65535")
+		}
+		if config.Distribution.Enabled && len(config.Distribution.Allow) == 0 {
+			return errors.New("distribution.allow is required when distribution is enabled")
+		}
+		for _, cidr := range config.Distribution.Allow {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return fmt.Errorf("distribution.allow requires CIDR addresses: %q", cidr)
+			}
+		}
 	}
 	seenSources := map[string]bool{}
 	seenAliases := map[string]struct{}{}
@@ -376,6 +430,9 @@ func ReferencePaths(config Config, model domain.DesiredModel) ([]string, error) 
 		if pathWithin(candidate, filepath.Join(config.LocalBasePath, ".staging")) {
 			return nil, errors.New("model path cannot use the reserved .staging directory")
 		}
+		if pathWithin(candidate, DistributionRoot(config)) {
+			return nil, errors.New("model path cannot use the reserved .distribution directory")
+		}
 		if pathWithin(candidate, filepath.Join(config.LocalBasePath, ".modelshelf")) {
 			return nil, errors.New("model path cannot use the reserved .modelshelf directory")
 		}
@@ -560,4 +617,40 @@ func EnsureLocalLayout(config Config) error {
 		return fmt.Errorf("publish local layout marker: %w", err)
 	}
 	return syncDirectory(parent)
+}
+
+func DistributionRoot(c Config) string { return filepath.Join(c.LocalBasePath, ".distribution") }
+func PublishedRoot(c Config) string    { return filepath.Join(DistributionRoot(c), "published") }
+func FallbackConfig(c Config) Config {
+	c.Upstream = nil
+	c.NFSLocalPath += "-fallback"
+	return c
+}
+
+// EnsureDistributionLayout establishes traversal independent of the caller's umask.
+// Only the managed distribution directories are changed, never the user's home.
+func EnsureDistributionLayout(c Config) error {
+	for _, directory := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{DistributionRoot(c), 0755},
+		{filepath.Join(DistributionRoot(c), "staging"), 0700},
+		{PublishedRoot(c), 0755},
+	} {
+		if err := os.MkdirAll(directory.path, directory.mode); err != nil {
+			return err
+		}
+		info, err := os.Lstat(directory.path)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("distribution directory must be a real directory: %s", directory.path)
+		}
+		if err := os.Chmod(directory.path, directory.mode); err != nil {
+			return err
+		}
+	}
+	return nil
 }

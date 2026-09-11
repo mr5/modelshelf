@@ -99,7 +99,7 @@ func TestArtifactReferenceRoundTripsWithoutSelectedFiles(t *testing.T) {
 func TestLoadRejectsFutureConfigAndLocalLayoutSchemas(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yml")
-	input := `schemaVersion: 3
+	input := `schemaVersion: 4
 serverUrl: http://modelshelf.test:8080
 nfsLocalPath: /mnt/modelshelf
 localBasePath: ` + filepath.Join(root, "local") + `
@@ -342,4 +342,107 @@ func TestValidateRejectsFilesystemRootAsLocalBase(t *testing.T) {
 
 func model(provider, id string) domain.DesiredModel {
 	return domain.DesiredModel{Provider: provider, ID: id, RequestedRevision: "main"}
+}
+
+func TestMinimalPeerConfiguration(t *testing.T) {
+	for _, version := range []string{"2", "3"} {
+		path := filepath.Join(t.TempDir(), "config.yml")
+		input := "schemaVersion: " + version + "\nserverUrl: http://metadata.test\nupstream:\n  host: 192.168.100.1\ndistribution:\n  enabled: true\n  allow: [192.168.100.0/24]\n"
+		if err := os.WriteFile(path, []byte(input), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c, _, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.SchemaVersion != 3 || c.Upstream.Fallback || c.NFSLocalPath != "/mnt/modelshelf" {
+			t.Fatalf("unexpected defaults: %+v", c)
+		}
+		if err := Save(c, path); err != nil {
+			t.Fatal(err)
+		}
+		loaded, _, err := Load(path)
+		if err != nil || loaded.Upstream.Host != c.Upstream.Host || !loaded.Distribution.Enabled {
+			t.Fatalf("round trip: %+v %v", loaded, err)
+		}
+	}
+	for _, extra := range []string{"upstream: {}", "upstream: {host: 'host:/path'}", "upstream: {host: 'host,other'}", "distribution: {enabled: true}", "distribution: {enabled: true, allow: ['*']}", "upstream: {host: peer, fallback: {type: server}}"} {
+		path := filepath.Join(t.TempDir(), "config.yml")
+		if err := os.WriteFile(path, []byte("serverUrl: http://metadata.test\n"+extra+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Load(path); err == nil {
+			t.Fatalf("accepted invalid config: %s", extra)
+		}
+	}
+}
+
+func TestDistributionDirectoryCannotBeAModelReference(t *testing.T) {
+	c := Config{LocalBasePath: t.TempDir()}
+	for _, path := range []string{".distribution", ".distribution/published/model", filepath.Join(c.LocalBasePath, ".distribution", "staging")} {
+		if _, err := ReferencePaths(c, domain.DesiredModel{Path: path}); err == nil {
+			t.Fatalf("accepted reserved path: %s", path)
+		}
+	}
+}
+
+func TestUpstreamPortDefaultValidationAndRoundTrip(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  int
+		valid bool
+	}{
+		{"", 2049, true}, {"2049", 2049, true}, {"12049", 12049, true}, {"65535", 65535, true},
+		{"0", 0, false}, {"-1", 0, false}, {"65536", 0, false}, {"abc", 0, false},
+	} {
+		path := filepath.Join(t.TempDir(), "config.yml")
+		input := "schemaVersion: 3\nupstream:\n  host: 192.168.100.1\n"
+		if test.value != "" {
+			input += "  port: " + test.value + "\n"
+		}
+		if err := os.WriteFile(path, []byte(input), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c, _, err := Load(path)
+		if !test.valid {
+			if err == nil {
+				t.Fatalf("accepted port %s", test.value)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Upstream.NFSPort() != test.want {
+			t.Fatalf("port %s resolved to %d", test.value, c.Upstream.NFSPort())
+		}
+		if err := Save(c, path); err != nil {
+			t.Fatal(err)
+		}
+		reloaded, _, err := Load(path)
+		if err != nil || reloaded.Upstream.NFSPort() != test.want {
+			t.Fatalf("port round trip: %v %v", reloaded, err)
+		}
+	}
+}
+
+func TestDistributionPortRoundTrip(t *testing.T) {
+	for _, value := range []int{2049, 12049, 65535} {
+		c, err := Defaults()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Distribution = &Distribution{Enabled: true, Port: &value, Allow: []string{"192.168.100.0/24"}}
+		path := filepath.Join(t.TempDir(), "config.yml")
+		if err := Save(c, path); err != nil {
+			t.Fatal(err)
+		}
+		loaded, _, err := Load(path)
+		if err != nil || loaded.Distribution.NFSPort() != value {
+			t.Fatalf("port roundtrip %d: %v %v", value, loaded, err)
+		}
+	}
+	if (&Distribution{}).NFSPort() != 2049 {
+		t.Fatal("missing port must default to 2049")
+	}
 }

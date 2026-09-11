@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from . import __version__
 from .client_distribution import (
     CLIENT_PLATFORMS,
     archive_filename,
@@ -184,6 +185,7 @@ models:
         "# ModelShelf integration",
         "Mount immutable artifacts directly over read-only NFS, or reconcile selected models "
         "onto local storage with the client CLI.",
+        f"Current server version: **{__version__}**.",
         f"Canonical agent-readable URL: <{markdown_url}>",
         "- [Direct NFS](#direct-nfs)",
         "- [Client CLI](#client-cli)",

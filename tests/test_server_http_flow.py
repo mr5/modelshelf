@@ -396,6 +396,7 @@ def test_integration_markdown_is_public_and_uses_deployment_metadata(tmp_path: P
         'inline; filename="modelshelf-integration.md"'
     )
     assert "# ModelShelf integration" in response.text
+    assert f"Current server version: **{info['version']}**." in response.text
     assert "```bash" in response.text
     assert "```yaml" in response.text
     assert "models.internal:12049" in response.text

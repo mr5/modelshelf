@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MANIFEST_SCHEMA_VERSION: Literal[2] = 2
-TASK_SCHEMA_VERSION: Literal[7] = 7
+TASK_SCHEMA_VERSION: Literal[8] = 8
 STORAGE_LAYOUT_SCHEMA_VERSION: Literal[2] = 2
 ARTIFACT_ALIASES_SCHEMA_VERSION: Literal[1] = 1
 
@@ -183,7 +183,7 @@ class InferredMetadata(Model):
 
 
 class DownloadTask(Model):
-    schema_version: Literal[7]
+    schema_version: Literal[8]
     id: str
     provider: Provider
     source_id: str
@@ -215,6 +215,8 @@ class DownloadTask(Model):
     average_bytes_per_second: float = Field(default=0, ge=0)
     eta_seconds: int | None = Field(default=None, ge=0)
     download_elapsed_seconds: float = Field(default=0, ge=0)
+    # Offset in active download time, not wall time: pauses must not count.
+    local_processing_started_after_seconds: float | None = Field(default=None, ge=0)
     verification_bytes_completed: int = Field(default=0, ge=0)
     verification_total_bytes: int | None = Field(default=None, ge=0)
     verification_instantaneous_bytes_per_second: float = Field(default=0, ge=0)

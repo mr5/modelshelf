@@ -925,6 +925,19 @@ class TaskManager:
         else:
             measured_bytes = downloaded
         average_speed = measured_bytes / elapsed if elapsed > 0 else 0.0
+        task = self.store.get(task_id)
+        processing = (
+            task is not None
+            and task.provider in {Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}
+            and total is not None
+            and total > 0
+            and downloaded >= total
+        )
+        processing_start = None
+        if processing and task is not None:
+            processing_start = task.local_processing_started_after_seconds
+            if processing_start is None:
+                processing_start = elapsed
         eta_speed = speed if speed > 0 else average_speed
         eta = (
             math.ceil(max(0, total - downloaded) / eta_speed)
@@ -936,10 +949,11 @@ class TaskManager:
             bytes_downloaded=downloaded,
             total_bytes=total,
             progress=progress,
-            instantaneous_bytes_per_second=speed,
+            instantaneous_bytes_per_second=0 if processing else speed,
             average_bytes_per_second=average_speed,
-            eta_seconds=eta,
+            eta_seconds=None if processing else eta,
             download_elapsed_seconds=elapsed,
+            local_processing_started_after_seconds=processing_start,
         )
 
     def _start_metrics(self, task: DownloadTask) -> None:

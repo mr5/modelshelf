@@ -151,6 +151,7 @@ export interface DownloadTask {
   averageBytesPerSecond?: number;
   etaSeconds?: number;
   downloadElapsedSeconds?: number;
+  localProcessingStartedAfterSeconds?: number;
   verificationBytesCompleted?: number;
   verificationTotalBytes?: number;
   verificationInstantaneousBytesPerSecond?: number;

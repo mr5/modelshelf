@@ -3,7 +3,7 @@ import type { DragEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, formatBytes, formatDuration, formatRate } from "../api.ts";
 import { DeleteConfirm } from "../components/DeleteConfirm.tsx";
-import { taskStepProgress } from "../taskProgress.ts";
+import { currentTaskStep, localProcessingElapsed, taskStepProgress } from "../taskProgress.ts";
 import type { DownloadTask, Page, Provider, ServerInfo, TaskStatus } from "../types.ts";
 import { TaskPage } from "./TaskPage.tsx";
 
@@ -200,9 +200,11 @@ export function TasksPage() {
             <td><Link className="row-title" to={`/tasks/${task.id}`}>{task.sourceId}</Link><span className="subline">{task.provider}</span></td>
             <td className="task-status-cell">
               <div className="task-status-stack">
-                <span className={`badge ${task.status}`}>{task.status.replace("_", " ")}</span>
+                <span className={`badge ${task.status}`}>{task.status === "downloading" && currentTaskStep(task) === "processing" ? "local processing" : task.status.replace("_", " ")}</span>
                 {task.status === "scheduled" && task.scheduledAt && <span className="task-live-metrics"><span>Starts {new Date(task.scheduledAt).toLocaleString()}</span></span>}
-                {task.status === "downloading" && <span className="task-live-metrics"><strong>{formatRate(task.instantaneousBytesPerSecond)}</strong><span aria-hidden="true">·</span><span>ETA {formatDuration(task.etaSeconds)}</span></span>}
+                {task.status === "downloading" && (currentTaskStep(task) === "processing"
+                  ? <span className="task-live-metrics"><span>{localProcessingElapsed(task)}</span></span>
+                  : <span className="task-live-metrics"><strong>{formatRate(task.instantaneousBytesPerSecond)}</strong><span aria-hidden="true">·</span><span>ETA {formatDuration(task.etaSeconds)}</span></span>)}
                 {task.status === "verifying" && (task.verificationTotalBytes === undefined || task.verificationDetail === "Waiting for verification capacity"
                   ? <span className="task-live-metrics"><span>{task.verificationDetail ?? "Verification in progress"}</span></span>
                   : <span className="task-live-metrics"><strong>Verify {formatRate(task.verificationInstantaneousBytesPerSecond)}</strong><span aria-hidden="true">·</span><span>ETA {formatDuration(task.verificationEtaSeconds)}</span></span>)}

@@ -229,7 +229,7 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     loaded = manager.store.get(task_id)
     assert loaded is not None
     assert loaded.mirror_url is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 7
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 8
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 1
@@ -239,7 +239,7 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     assert migrated is not None
     assert migrated.mirror_url is None
     assert migrated.scheduled_at is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 7
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 8
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 4
@@ -251,7 +251,16 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     assert migrated.verification_bytes_completed == 0
     assert migrated.verification_detail is None
     assert migrated.artifact_alias is None
-    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 7
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 8
+
+    document = json.loads(task_path.read_text(encoding="utf-8"))
+    document["schemaVersion"] = 7
+    document.pop("localProcessingStartedAfterSeconds", None)
+    task_path.write_text(json.dumps(document), encoding="utf-8")
+    migrated = manager.store.get(task_id)
+    assert migrated is not None
+    assert migrated.local_processing_started_after_seconds is None
+    assert json.loads(task_path.read_text(encoding="utf-8"))["schemaVersion"] == 8
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 6
@@ -276,7 +285,7 @@ def test_old_task_files_are_atomically_upgraded_to_current_schema(tmp_path: Path
     assert migrated.reused_bytes == 0
 
     document = json.loads(task_path.read_text(encoding="utf-8"))
-    document["schemaVersion"] = 8
+    document["schemaVersion"] = 9
     task_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(FutureSchemaVersionError, match="upgrade ModelShelf"):
         manager.store.list()
@@ -1257,6 +1266,69 @@ def test_known_preflight_size_drives_download_progress_and_speed(
         )
 
     assert asyncio.run(exercise()) == (45, 500, 1_000, 50, 50, 10)
+
+
+def test_modelscope_local_processing_timer_excludes_pauses_and_resets_on_transfer(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None, clock=lambda: now[0])
+
+    async def exercise() -> None:
+        task = await manager.create(
+            Provider.MODELSCOPE_CN, "owner/model", "master", total_bytes=1_000,
+        )
+        manager._start_metrics(task)
+        now[0] = 110
+        await manager._progress(task.id, 1_000, 1_000)
+        now[0] = 120
+        await manager._progress(task.id, 1_000, 1_000)
+        updated = manager.store.get(task.id)
+        assert updated is not None
+        assert updated.local_processing_started_after_seconds == 10
+        assert updated.download_elapsed_seconds == 20
+        assert updated.eta_seconds is None
+        assert updated.instantaneous_bytes_per_second == 0
+        paused = await manager._stop_metrics(task.id)
+        # Reload from disk, as on a process restart, then resume after a long pause.
+        now[0] = 1_000
+        manager._start_metrics(paused)
+        now[0] = 1_005
+        await manager._progress(task.id, 1_000, 1_000)
+        resumed = manager.store.get(task.id)
+        assert resumed is not None
+        assert resumed.local_processing_started_after_seconds == 10
+        assert resumed.download_elapsed_seconds == 25
+        now[0] = 1_010
+        await manager._progress(task.id, 500, 1_000)
+        transferring = manager.store.get(task.id)
+        assert transferring is not None
+        assert transferring.local_processing_started_after_seconds is None
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("provider,total", [(Provider.HUGGINGFACE, 1_000),
+                                          (Provider.MODELSCOPE_CN, 0),
+                                          (Provider.MODELSCOPE_AI, None)])
+def test_local_processing_requires_known_nonzero_modelscope_transfer(
+    tmp_path: Path, provider: Provider, total: int | None,
+) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+
+    async def exercise() -> None:
+        task = await manager.create(provider, "owner/model", "main", total_bytes=total)
+        manager._start_metrics(task)
+        await manager._progress(task.id, total or 0, total)
+        updated = manager.store.get(task.id)
+        assert updated is not None
+        assert updated.local_processing_started_after_seconds is None
+
+    asyncio.run(exercise())
 
 
 def test_average_speed_uses_only_bytes_measured_after_resume(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
-import { formatBytes } from "./api.ts";
+import { formatBytes, formatDuration } from "./api.ts";
 import type { DownloadTask, TaskStatus } from "./types.ts";
 
-export type TaskStepKey = "resolving" | "downloading" | "confirmation" | "verifying" | "publishing";
+export type TaskStepKey = "resolving" | "downloading" | "processing" | "confirmation" | "verifying" | "publishing";
 export type TaskStepState = "pending" | "active" | "complete" | "paused" | "failed" | "cancelled" | "waiting";
 
 export interface TaskStepView {
@@ -22,15 +22,34 @@ export interface TaskStepProgress {
 const stepLabels: Record<TaskStepKey, string> = {
   resolving: "Resolve",
   downloading: "Download",
+  processing: "Local processing",
   confirmation: "Confirm",
   verifying: "Verify",
   publishing: "Publish",
 };
 
 function stepKeys(task: DownloadTask): TaskStepKey[] {
+  if (isModelScope(task)) return ["resolving", "downloading", "processing", "verifying", "publishing"];
   return task.provider === "http"
     ? ["resolving", "downloading", "confirmation", "verifying", "publishing"]
     : ["resolving", "downloading", "verifying", "publishing"];
+}
+
+function isModelScope(task: DownloadTask): boolean {
+  return task.provider === "modelscope-cn" || task.provider === "modelscope-ai";
+}
+
+function hasFinishedTransfer(task: DownloadTask): boolean {
+  // Also covers records from servers predating the processing timer.
+  return isModelScope(task) && task.totalBytes !== undefined
+    && task.totalBytes > 0 && task.bytesDownloaded >= task.totalBytes;
+}
+
+export function localProcessingElapsed(task: DownloadTask): string {
+  const start = task.localProcessingStartedAfterSeconds;
+  if (start === undefined) return "Elapsed time unavailable";
+  const elapsed = Math.max(0, (task.downloadElapsedSeconds ?? start) - start);
+  return `${elapsed > 0 ? formatDuration(elapsed) : "0s"} elapsed`;
 }
 
 function stoppedStep(task: DownloadTask): TaskStepKey {
@@ -44,6 +63,7 @@ function stoppedStep(task: DownloadTask): TaskStepKey {
   ) return "verifying";
   if (task.provider === "http" && task.inferredMetadata) return "confirmation";
   if (task.progress >= 92) return "verifying";
+  if (hasFinishedTransfer(task)) return "processing";
   if (task.resolvedRevision || task.bytesDownloaded > 0 || task.progress >= 2) return "downloading";
   return "resolving";
 }
@@ -51,7 +71,7 @@ function stoppedStep(task: DownloadTask): TaskStepKey {
 export function currentTaskStep(task: DownloadTask): TaskStepKey | undefined {
   switch (task.status) {
     case "resolving": return "resolving";
-    case "downloading": return "downloading";
+    case "downloading": return hasFinishedTransfer(task) ? "processing" : "downloading";
     case "awaiting_confirmation": return "confirmation";
     case "verifying": return "verifying";
     case "publishing": return "publishing";
@@ -107,6 +127,17 @@ function transferred(task: DownloadTask): string {
 
 export function taskStepProgress(task: DownloadTask): TaskStepProgress {
   const step = currentTaskStep(task);
+  if (step === "processing") {
+    return {
+      step,
+      label: "Git LFS local processing",
+      value: task.status === "downloading"
+        ? `Transfer complete · ${localProcessingElapsed(task)}`
+        : `Local processing ${activeState(task.status)} · ${localProcessingElapsed(task)}`,
+      indeterminate: task.status === "downloading",
+      showBar: task.status === "downloading",
+    };
+  }
   if (step === "downloading") {
     const stepPercent = percent(task.bytesDownloaded, task.totalBytes);
     return {

@@ -122,7 +122,11 @@ the provider process group. Staging is discarded only after successful publicati
 task cancellation/deletion; unrecognized ModelScope staging is preserved and reported as an error.
 
 Downloads expose transferred bytes, current/average speed, and ETA. They can be paused, resumed
-immediately or at a later time, and cancelled. A task can lock its immutable revision immediately
+immediately or at a later time, and cancelled. Once a ModelScope transfer reaches its known size,
+the UI shows a separate **Local processing** stage while Git LFS finishes checkout/index work.
+It displays active elapsed time (excluding pauses), with an indeterminate bar instead of an
+unsupported percentage or a misleading zero-second ETA. Verification remains a separate stage.
+A task can lock its immutable revision immediately
 and defer entering the download queue until a one-time UTC timestamp. Scheduled starts and resumes
 use one-shot timers and do not poll the source. Concurrency is bounded by `MODELSHELF_MAX_CONCURRENT_DOWNLOADS` globally and
 `MODELSHELF_MAX_CONCURRENT_DOWNLOADS_PER_SOURCE` per source.

@@ -156,6 +156,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
     titleUrl={sourceUrl}
     eyebrow={task.provider}
     status={task.status}
+    statusLabel={task.status === "downloading" && activity.step === "processing" ? "local processing" : undefined}
     onClose={close}
     footer={(canCancel || canDelete) && <>
       {canPause && <button className="ghost" disabled={actionBusy} onClick={() => void control("pause")}>Pause</button>}
@@ -199,6 +200,7 @@ export function TaskPage({ taskId, onDeleted }: { taskId: string; onDeleted?: (t
         ><i style={{ width: `${activity.percent ?? 0}%` }} /></div>
         <strong className="task-progress-percent">{activity.percent === undefined ? "—" : `${activity.percent}%`}</strong>
       </div>}
+      {activity.step === "processing" && <p className="muted">Network transfer is complete. Git LFS is finishing local file checkout and index refresh before verification. Git does not report a reliable percentage or ETA for this stage.</p>}
       {(activity.step === "downloading" || activity.step === "verifying" || task.status === "completed") && <div className="task-metrics">
         <Metric label={isVerificationActivity ? "Verification speed" : "Instant speed"} value={formatRate(isVerificationActivity ? task.verificationInstantaneousBytesPerSecond : task.instantaneousBytesPerSecond)} />
         <Metric label={isVerificationActivity ? "Average verification speed" : "Average speed"} value={formatRate(isVerificationActivity ? task.verificationAverageBytesPerSecond : task.averageBytesPerSecond)} />
@@ -240,11 +242,12 @@ function TaskSteps({ steps }: { steps: TaskStepView[] }) {
   </ol>;
 }
 
-function ModalFrame({ title, titleUrl, eyebrow, status, onClose, footer, children }: {
+function ModalFrame({ title, titleUrl, eyebrow, status, statusLabel, onClose, footer, children }: {
   title: string;
   titleUrl?: string;
   eyebrow?: string;
   status?: string;
+  statusLabel?: string;
   onClose: () => void;
   footer?: ReactNode;
   children: ReactNode;
@@ -259,7 +262,7 @@ function ModalFrame({ title, titleUrl, eyebrow, status, onClose, footer, childre
             : title}</h2>
         </div>
         <div className="task-modal-header-actions">
-          {status && <span className={`badge large ${status}`}>{status.replace("_", " ")}</span>}
+          {status && <span className={`badge large ${status}`}>{statusLabel ?? status.replace("_", " ")}</span>}
           <button className="modal-close" aria-label="Close task details" autoFocus onClick={onClose}>×</button>
         </div>
       </header>

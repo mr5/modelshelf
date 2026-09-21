@@ -140,6 +140,12 @@ def _task_v6_to_v7(document: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _task_v7_to_v8(document: dict[str, Any]) -> dict[str, Any]:
+    result = dict(document)
+    result.setdefault("localProcessingStartedAfterSeconds", None)
+    return result
+
+
 def _manifest_v1_to_v2(document: dict[str, Any]) -> dict[str, Any]:
     result = dict(document)
     source = dict(result.get("source") or {})
@@ -161,6 +167,7 @@ def load_task_json(raw: str) -> tuple[DownloadTask, bool]:
             4: _task_v4_to_v5,
             5: _task_v5_to_v6,
             6: _task_v6_to_v7,
+            7: _task_v7_to_v8,
         },
         missing_version=0,
     )

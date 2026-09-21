@@ -29,6 +29,14 @@ version at a time without skipping intermediate versions.
 5. Published manifests are normalized in memory by version-specific readers. Payload identity and filesystem location do not change just because metadata syntax evolves.
 6. A migration release must include fixtures for every supported source version, future-version rejection tests, interruption/atomicity tests, and downgrade tests.
 
+## Download job version 8
+
+Job v8 adds optional `localProcessingStartedAfterSeconds`, an offset into active download elapsed
+time. It records when a ModelScope transfer reached its known total while the provider was still
+running, so the UI can time local processing without including pauses. The v7 to v8 migration
+leaves this value unset for existing jobs rather than inventing a historical timestamp.
+Older servers reject v8 jobs; do not downgrade them. Artifact and storage layout schemas are unchanged.
+
 ## Storage layout version 2
 
 Storage layout v2 records the traversal-permission invariant for the exported artifact namespace.

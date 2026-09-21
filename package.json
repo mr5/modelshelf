@@ -1,9 +1,10 @@
 {
   "name": "modelshelf",
-  "version": "0.1.0-beta.26",
+  "version": "0.1.0-beta.27",
   "private": true,
   "packageManager": "pnpm@11.22.0",
   "scripts": {
+    "test:ui": "node --experimental-transform-types --test tests/ui/*.test.ts",
     "build": "pnpm --filter @modelshelf/ui build",
     "dev": "pnpm --filter @modelshelf/ui dev",
     "typecheck": "pnpm --filter @modelshelf/ui typecheck",

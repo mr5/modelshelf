@@ -1,27 +1,41 @@
 import DOMPurify from "dompurify";
-import hljs from "highlight.js/lib/core";
-import bash from "highlight.js/lib/languages/bash";
-import ini from "highlight.js/lib/languages/ini";
-import plaintext from "highlight.js/lib/languages/plaintext";
-import yaml from "highlight.js/lib/languages/yaml";
 import { marked } from "marked";
-import { type MouseEvent, useEffect, useMemo, useState } from "react";
+import { ArrowUpRight } from "lucide-react";
+import {
+  memo,
+  type RefObject,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
+import { CodeBlock } from "@/components/agents/code-block";
+import type { AgentCodeLanguage } from "@/components/agents/agent-code";
+import { ButtonLink } from "@/components/motion/button/base";
+import {
+  ErrorBox,
+  Loading,
+  PageHeader,
+  PageShell,
+  Panel,
+  useToast,
+  writeClipboard,
+} from "@/components/ui";
 
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("yaml", yaml);
-hljs.registerLanguage("ini", ini);
-hljs.registerLanguage("plaintext", plaintext);
-
-const languageAliases: Record<string, string> = {
+const languageAliases: Record<string, AgentCodeLanguage> = {
   bash: "bash",
   sh: "bash",
   shell: "bash",
+  json: "json",
+  diff: "diff",
+  ts: "typescript",
+  typescript: "typescript",
+  tsx: "tsx",
   yaml: "yaml",
   yml: "yaml",
   ini: "ini",
   fstab: "ini",
-  text: "plaintext",
-  plaintext: "plaintext",
 };
 
 function headingId(value: string) {
@@ -33,42 +47,58 @@ function headingId(value: string) {
 }
 
 function renderMarkdown(markdown: string) {
+  const blocks: Array<{
+    code: string;
+    language: AgentCodeLanguage;
+  }> = [];
   const renderer = new marked.Renderer();
   renderer.heading = function ({ tokens, depth, text }) {
     const content = this.parser.parseInline(tokens);
     return `<h${depth} id="${headingId(text)}">${content}</h${depth}>`;
   };
   renderer.code = ({ text, lang }) => {
-    const requested = lang?.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "plaintext";
-    const language = languageAliases[requested] ?? "plaintext";
-    const highlighted = hljs.highlight(text, { language, ignoreIllegals: true }).value;
-    return `<div class="copy-block highlighted-code-block"><pre><code class="hljs language-${language}">${highlighted}</code></pre><button class="small" type="button" data-copy-code>Copy</button></div>`;
+    const requested =
+      lang?.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "plaintext";
+    const index =
+      blocks.push({
+        code: text,
+        language: languageAliases[requested] ?? "text",
+      }) - 1;
+    return `<div data-code-block="${index}"></div>`;
   };
   const rendered = marked.parse(markdown, { renderer });
-  if (typeof rendered !== "string") throw new Error("Markdown renderer returned no document");
-  return DOMPurify.sanitize(rendered);
-}
-
-async function copyText(value: string) {
-  if (navigator.clipboard) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  const input = document.createElement("textarea");
-  input.value = value;
-  input.style.position = "fixed";
-  input.style.opacity = "0";
-  document.body.append(input);
-  input.select();
-  const succeeded = document.execCommand("copy");
-  input.remove();
-  if (!succeeded) throw new Error("clipboard API unavailable");
+  if (typeof rendered !== "string")
+    throw new Error("Markdown renderer returned no document");
+  return { html: DOMPurify.sanitize(rendered), blocks };
 }
 
 export function IntegrationPage() {
   const [markdown, setMarkdown] = useState("");
   const [error, setError] = useState("");
-  const rendered = useMemo(() => (markdown ? renderMarkdown(markdown) : ""), [markdown]);
+  const rendered = useMemo(
+    () => (markdown ? renderMarkdown(markdown) : null),
+    [markdown],
+  );
+  const articleRef = useRef<HTMLElement>(null);
+  const [codeTargets, setCodeTargets] = useState<Element[]>([]);
+  const { notify } = useToast();
+
+  useEffect(() => {
+    setCodeTargets(
+      Array.from(
+        articleRef.current?.querySelectorAll("[data-code-block]") ?? [],
+      ),
+    );
+    if (window.location.hash) {
+      try {
+        document
+          .getElementById(decodeURIComponent(window.location.hash.slice(1)))
+          ?.scrollIntoView();
+      } catch {
+        /* A malformed fragment does not prevent reading the guide. */
+      }
+    }
+  }, [rendered]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -80,64 +110,95 @@ export function IntegrationPage() {
       .then(async (response) => {
         if (!response.ok) {
           const detail = (await response.text()).trim();
-          throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+          throw new Error(
+            `HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
+          );
         }
         return response.text();
       })
       .then(setMarkdown)
       .catch((cause: unknown) => {
-        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        if (cause instanceof DOMException && cause.name === "AbortError")
+          return;
         setError(cause instanceof Error ? cause.message : String(cause));
       });
     return () => controller.abort();
   }, []);
 
-  async function handleDocumentClick(event: MouseEvent<HTMLElement>) {
-    const target = event.target;
-    if (!(target instanceof HTMLButtonElement) || !target.hasAttribute("data-copy-code")) return;
-    const code = target.parentElement?.querySelector("code")?.textContent;
-    if (code === undefined) return;
-    try {
-      await copyText(code);
-      target.textContent = "Copied";
-    } catch {
-      target.textContent = "Copy failed";
-    }
-    window.setTimeout(() => {
-      target.textContent = "Copy";
-    }, 1800);
-  }
-
   return (
-    <div className="page integration-page">
-      <div className="page-head">
-        <div>
-          <p className="eyebrow">Consume the shelf</p>
-          <h1>Integration</h1>
-        </div>
-        <a
-          className="button secondary integration-agent-link"
-          href="/integration.md"
-          target="_blank"
-          rel="noreferrer"
-        >
-          For agents · Markdown ↗
-        </a>
-      </div>
-
+    <PageShell className="scroll-smooth">
+      <PageHeader
+        eyebrow="Consume the shelf"
+        title="Integration"
+        actions={
+          <ButtonLink
+            variant="outline"
+            href="/integration.md"
+            target="_blank"
+            rel="noreferrer"
+          >
+            For agents · Markdown
+            <ArrowUpRight className="size-4" aria-hidden />
+          </ButtonLink>
+        }
+      />
       {error && (
-        <div className="error-box">Could not load integration documentation: {error}</div>
+        <ErrorBox>Could not load integration documentation: {error}</ErrorBox>
       )}
       {!error && !markdown && (
-        <div className="panel integration-loading">Loading integration documentation…</div>
+        <Panel className="p-6">
+          <Loading className="justify-start">
+            Loading integration documentation…
+          </Loading>
+        </Panel>
       )}
       {rendered && (
-        <article
-          className="integration-markdown"
-          onClick={(event) => void handleDocumentClick(event)}
-          dangerouslySetInnerHTML={{ __html: rendered }}
-        />
+        <MarkdownArticle html={rendered.html} articleRef={articleRef} />
       )}
-    </div>
+      {rendered &&
+        codeTargets.map((target, index) => {
+          const block = rendered.blocks[index];
+          return (
+            block &&
+            createPortal(
+              <CodeBlock
+                code={block.code}
+                language={block.language}
+                showLineNumbers={false}
+                maxHeight={480}
+                onCopy={() => writeClipboard(block.code)}
+                onCopyError={(cause) =>
+                  notify({
+                    status: "error",
+                    title: "Could not copy code",
+                    description:
+                      cause instanceof Error ? cause.message : String(cause),
+                  })
+                }
+              />,
+              target,
+              String(index),
+            )
+          );
+        })}
+    </PageShell>
   );
 }
+
+// The sanitized HTML owns these nodes; memo keeps portal targets stable when
+// code blocks or toast state update the surrounding React tree.
+const MarkdownArticle = memo(function MarkdownArticle({
+  html,
+  articleRef,
+}: {
+  html: string;
+  articleRef: RefObject<HTMLElement | null>;
+}) {
+  return (
+    <article
+      className="integration-markdown"
+      ref={articleRef}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+});

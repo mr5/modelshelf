@@ -54,6 +54,10 @@ jobs:
         run: pnpm typecheck
       - name: Test progress presentation
         run: pnpm test:ui
+      - name: Install browser for UI regression tests
+        run: pnpm --filter @modelshelf/ui exec playwright install --with-deps chromium
+      - name: Test UI interactions
+        run: pnpm test:ui:browser
       - name: Build
         run: pnpm build
 

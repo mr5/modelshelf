@@ -12,6 +12,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { Button } from "@/components/motion/button/base";
+import { ThemePicker } from "@/components/ThemePicker";
 import { SharedLayoutBg } from "@/components/motion/shared-layout-bg";
 import { BrandMark, ErrorBox, Loading, ToastProvider } from "@/components/ui";
 import { SPRING_LAYOUT } from "@/lib/ease";
@@ -208,6 +209,7 @@ function Shell({
             <span className="hidden sm:inline">ModelShelf</span>
           </Link>
           <MainNav links={links} />
+          <ThemePicker />
           {authenticated ? (
             <Button
               variant="ghost"

@@ -65,6 +65,8 @@ export interface TableProps<T> {
   rowHeight?: number;
   /** Scroll viewport height in px. */
   height?: number;
+  /** Page mode renders every row in document flow without a scroll viewport. */
+  scrollMode?: "container" | "page";
   /** Rows rendered above/below the viewport. */
   overscan?: number;
   /** Fires when the viewport scrolls near the bottom — load the next page. */

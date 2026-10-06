@@ -1,7 +1,9 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* ModelShelf brand mapped onto the beUI / shadcn semantic tokens. */
 :root {
+  color-scheme: light;
   /* beUI "Current" tokens, with ModelShelf green as the primary action colour. */
   --background: oklch(99% 0.002 160);
   --foreground: oklch(19% 0.012 170);
@@ -27,18 +29,17 @@
   --ring: var(--border-strong);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: oklch(17% 0.006 170);
-    --foreground: oklch(95% 0.004 160);
-    --card: oklch(21% 0.007 170);
-    --muted-foreground: oklch(66% 0.012 165);
-    --border: oklch(100% 0 0 / 0.07);
-    --border-strong: oklch(100% 0 0 / 0.13);
-    --danger: oklch(66% 0.18 25);
-    --primary: oklch(70% 0.12 165);
-    --primary-foreground: oklch(17% 0.03 170);
-  }
+:root.dark {
+  color-scheme: dark;
+  --background: oklch(17% 0.006 170);
+  --foreground: oklch(95% 0.004 160);
+  --card: oklch(21% 0.007 170);
+  --muted-foreground: oklch(66% 0.012 165);
+  --border: oklch(100% 0 0 / 0.07);
+  --border-strong: oklch(100% 0 0 / 0.13);
+  --danger: oklch(66% 0.18 25);
+  --primary: oklch(70% 0.12 165);
+  --primary-foreground: oklch(17% 0.03 170);
 }
 
 @theme inline {
@@ -90,7 +91,6 @@
 @layer base {
   html {
     font-synthesis: none;
-    color-scheme: light dark;
   }
   body {
     min-width: 320px;

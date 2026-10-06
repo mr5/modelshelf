@@ -2,6 +2,7 @@ import { type FormEvent, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { StatefulButton } from "@/components/motion/button/stateful";
 import { Input } from "@/components/motion/input";
+import { ThemePicker } from "@/components/ThemePicker";
 import { BrandMark, ErrorBox, Eyebrow, Panel } from "@/components/ui";
 import { api } from "../api.ts";
 
@@ -31,7 +32,10 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
     }
   }
   return (
-    <div className="grid min-h-screen place-items-center p-4">
+    <div className="relative grid min-h-screen place-items-center p-4">
+      <div className="absolute right-4 top-4 sm:right-6 sm:top-6">
+        <ThemePicker />
+      </div>
       <Panel className="w-full max-w-[420px] p-7 sm:p-9">
         <div className="mb-7">
           <BrandMark large />

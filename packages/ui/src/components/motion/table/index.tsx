@@ -93,6 +93,7 @@ export function Table<T>({
   onDeleteColumn,
   rowHeight = 48,
   height = 440,
+  scrollMode = "container",
   overscan = 10,
   onEndReached,
   loading = false,
@@ -100,6 +101,7 @@ export function Table<T>({
   emptyState = "No data",
   className,
 }: TableProps<T>) {
+  const pageScroll = scrollMode === "page";
   const reduce = useReducedMotion();
   const scrollRef = useRef<HTMLDivElement>(null);
   const thRefs: HeaderCellRefs = useRef<
@@ -152,13 +154,18 @@ export function Table<T>({
     getScrollElement: () => scrollRef.current,
     estimateSize: () => rowHeight,
     overscan,
+    enabled: !pageScroll,
   });
 
   const virtualItems = virtualizer.getVirtualItems();
+  const visibleRows = pageScroll
+    ? sortedRows.map((_, index) => ({ index }))
+    : virtualItems;
   const totalSize = virtualizer.getTotalSize();
-  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingTop =
+    !pageScroll && virtualItems.length > 0 ? virtualItems[0].start : 0;
   const paddingBottom =
-    virtualItems.length > 0
+    !pageScroll && virtualItems.length > 0
       ? totalSize - virtualItems[virtualItems.length - 1].end
       : 0;
 
@@ -183,18 +190,21 @@ export function Table<T>({
     // sizes the column.
     const inputOnly = (column: (typeof orderedColumns)[number]) =>
       Boolean(onColumnRename) || (!column.cell && Boolean(column.editable));
-    const total = orderedColumns.reduce((sum, column) => {
-      const resized = widths[column.key];
-      if (resized != null) return sum + resized;
-      const declared = resolveColumnWidth(column.width, rootFontSize);
-      if (declared != null) return sum + declared;
-      return (
-        sum +
-        (inputOnly(column)
-          ? Math.max(minColumnWidth, INPUT_COLUMN_WIDTH)
-          : minColumnWidth)
-      );
-    }, selectable ? CHECKBOX_PX : 0);
+    const total = orderedColumns.reduce(
+      (sum, column) => {
+        const resized = widths[column.key];
+        if (resized != null) return sum + resized;
+        const declared = resolveColumnWidth(column.width, rootFontSize);
+        if (declared != null) return sum + declared;
+        return (
+          sum +
+          (inputOnly(column)
+            ? Math.max(minColumnWidth, INPUT_COLUMN_WIDTH)
+            : minColumnWidth)
+        );
+      },
+      selectable ? CHECKBOX_PX : 0,
+    );
     return Math.round(total);
   }, [
     minColumnWidth,
@@ -234,9 +244,10 @@ export function Table<T>({
   }, []);
 
   const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
-  const [activeRow, setActiveRow] = useState<{ id: string; index: number } | null>(
-    null,
-  );
+  const [activeRow, setActiveRow] = useState<{
+    id: string;
+    index: number;
+  } | null>(null);
   const rowTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activateRow = useCallback((id: string, index: number) => {
     if (rowTimer.current) clearTimeout(rowTimer.current);
@@ -261,14 +272,17 @@ export function Table<T>({
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="overflow-auto"
-        style={{ height }}
+        className={pageScroll ? "overflow-visible" : "overflow-auto"}
+        style={pageScroll ? undefined : { height }}
       >
         <table
-          className={cn("border-collapse", sized ? "w-max" : undefined)}
+          className={cn(
+            "border-collapse",
+            sized && !pageScroll ? "w-max" : "w-full",
+          )}
           style={{
             tableLayout: "fixed",
-            minWidth: `max(100%, ${minTableWidth}px)`,
+            minWidth: pageScroll ? "100%" : `max(100%, ${minTableWidth}px)`,
           }}
         >
           <colgroup>
@@ -281,7 +295,7 @@ export function Table<T>({
               );
             })}
             {/* Empty filler owns the leftover space — no gap, content unpinned. */}
-            <col />
+            <col style={pageScroll ? { width: 0 } : undefined} />
           </colgroup>
 
           <TableHeader
@@ -317,7 +331,11 @@ export function Table<T>({
             {sortedRows.length === 0 ? (
               loading ? (
                 <SkeletonRows
-                  count={Math.max(1, Math.ceil(height / rowHeight))}
+                  count={
+                    pageScroll
+                      ? skeletonRows
+                      : Math.max(1, Math.ceil(height / rowHeight))
+                  }
                   columns={orderedColumns}
                   selectable={selectable}
                   rowHeight={rowHeight}
@@ -339,7 +357,7 @@ export function Table<T>({
                     <td colSpan={leadColumns + 1} />
                   </tr>
                 ) : null}
-                {virtualItems.map((vItem) => {
+                {visibleRows.map((vItem) => {
                   const entry = sortedRows[vItem.index];
                   const isSelected = selected.has(entry.id);
                   return (

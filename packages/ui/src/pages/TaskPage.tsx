@@ -6,7 +6,7 @@ import {
   useEffect,
   useState,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Button } from "@/components/motion/button/base";
 import { StatefulButton } from "@/components/motion/button/stateful";
 import {
@@ -50,15 +50,16 @@ export function TaskPage({
   onDeleted?: (taskId: string) => void;
 }) {
   const navigate = useNavigate();
+  const { search } = useLocation();
   const [shownTaskId, setShownTaskId] = useState(taskId);
   useEffect(() => {
     if (taskId) setShownTaskId(taskId);
   }, [taskId]);
   const changeOpen = useCallback(
     (open: boolean) => {
-      if (!open) navigate("/tasks", { replace: true });
+      if (!open) navigate({ pathname: "/tasks", search }, { replace: true });
     },
-    [navigate],
+    [navigate, search],
   );
   return (
     <CenterMorphModal open={taskId !== undefined} onOpenChange={changeOpen}>
@@ -90,6 +91,7 @@ function TaskDetail({
   onDeleted?: (taskId: string) => void;
 }) {
   const navigate = useNavigate();
+  const { search } = useLocation();
   const [task, setTask] = useState<DownloadTask | null>(null);
   const [error, setError] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
@@ -117,7 +119,8 @@ function TaskDetail({
     };
   }, [live, taskId]);
 
-  const close = () => navigate("/tasks", { replace: true });
+  const close = () =>
+    navigate({ pathname: "/tasks", search }, { replace: true });
 
   async function control(
     action: "pause" | "cancel" | "start",
@@ -185,7 +188,7 @@ function TaskDetail({
       const query = deleteArtifact ? "?deleteArtifact=true" : "";
       await api<void>(`/tasks/${taskId}${query}`, { method: "DELETE" });
       onDeleted?.(taskId);
-      navigate("/tasks", { replace: true });
+      navigate({ pathname: "/tasks", search }, { replace: true });
       return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));

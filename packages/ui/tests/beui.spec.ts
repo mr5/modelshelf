@@ -150,6 +150,233 @@ test("editable model and revision suggestions preserve exact manual values", asy
   await expect(revision).toHaveValue("main");
 });
 
+test("completed revisions open their published artifact on desktop and mobile", async ({
+  page,
+}, testInfo) => {
+  const revision = "eed8d15085f0b0790d21f0c3cee774f234425390";
+  await page.route("**/api/v1/tasks/page?*", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            ...task,
+            id: "completed-task",
+            status: "completed",
+            resolvedRevision: revision,
+            artifactId: "artifact-one",
+          },
+          {
+            ...task,
+            id: "unlinked-task",
+            sourceId: "acme/no-artifact",
+            status: "completed",
+            resolvedRevision: revision,
+          },
+          {
+            ...task,
+            id: "unfinished-task",
+            sourceId: "acme/unfinished",
+            artifactId: "artifact-one",
+            resolvedRevision: revision,
+          },
+        ],
+        total: 3,
+        hasMore: false,
+      },
+    }),
+  );
+  const listUrl = "/tasks?statusFilter=all&provider=huggingface&q=acme";
+  for (const width of [1440, 1024, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(listUrl);
+    const queue = page.getByRole("region", { name: "Download queue" });
+    const link = queue.getByRole("link", {
+      name: `View published artifact for acme/model, revision ${revision}`,
+      exact: true,
+    });
+    await expect(link).toHaveAttribute("href", "/artifacts/artifact-one");
+    await expect(link).toHaveText(revision);
+    await expect(
+      queue.getByRole("link", { name: /^View published artifact/ }),
+    ).toHaveCount(1);
+    for (const source of ["acme/no-artifact", "acme/unfinished"]) {
+      const row = queue
+        .locator("tbody tr")
+        .filter({ has: page.getByRole("link", { name: source, exact: true }) });
+      await expect(row.locator(`[title="${revision}"]`)).toHaveText(revision);
+    }
+    if (width === 1440)
+      await page.screenshot({
+        path: testInfo.outputPath("artifact-link-1440.png"),
+      });
+    if (width === 320) await link.press("Enter");
+    else await link.click();
+    await expect(page).toHaveURL(/\/artifacts\/artifact-one$/);
+    const detail = page.getByRole("dialog", { name: "Artifact details" });
+    await expect(detail).toBeVisible();
+    await expect(
+      detail.getByRole("heading", { name: "Model One", exact: true }),
+    ).toBeVisible();
+    if (width === 1440)
+      await page.screenshot({
+        path: testInfo.outputPath("artifact-details-1440.png"),
+      });
+    await page.goBack();
+    await expect(page).toHaveURL(listUrl);
+    await expect(link).toBeVisible();
+    await expect(
+      page.getByRole("textbox", { name: "Search downloads" }),
+    ).toHaveValue("acme");
+    await expect(
+      page.getByRole("button", { name: "Status: All statuses", exact: true }),
+    ).toBeVisible();
+    await queue.getByRole("link", { name: "acme/model", exact: true }).click();
+    await expect(page).toHaveURL(
+      `/tasks/completed-task?statusFilter=all&provider=huggingface&q=acme`,
+    );
+    await page
+      .getByRole("button", { name: "Close task details", exact: true })
+      .click();
+    await expect(page).toHaveURL(listUrl);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+  }
+});
+
+for (const width of [1440, 1280, 1024, 768, 767, 390, 320]) {
+  test(`long task lists fit and scroll with the document at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    const revision = "eed8d15085f0b0790d21f0c3cee774f234425390";
+    const statuses = [
+      "completed",
+      "awaiting_confirmation",
+      "downloading",
+      "failed",
+      "paused",
+      "verifying",
+    ] as const;
+    await page.route("**/api/v1/tasks/page?*", (route) => {
+      const offset = Number(
+        new URL(route.request().url()).searchParams.get("offset"),
+      );
+      return route.fulfill({
+        json: {
+          items: Array.from({ length: 50 }, (_, index) => ({
+            ...task,
+            id: `long-task-${offset + index}`,
+            sourceId: `Comfy-Org/Qwen-Image-2.1-large-model-${offset + index}`,
+            provider: "modelscope-cn",
+            resolvedRevision: revision,
+            status: statuses[index % statuses.length],
+            totalBytes: 69 * 1024 ** 3,
+            bytesDownloaded: 69 * 1024 ** 3,
+          })),
+          total: 100,
+          hasMore: offset === 0,
+        },
+      });
+    });
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto("/tasks");
+    const queue = page.getByRole("region", { name: "Download queue" });
+    const rows = queue.locator("tbody tr");
+    await expect(rows).toHaveCount(50);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+      `${width}px document fits`,
+    ).toBe(true);
+    expect(
+      await queue.evaluate((element) =>
+        [...element.querySelectorAll("*")].some((child) => {
+          const style = getComputedStyle(child);
+          return (
+            (/auto|scroll/.test(style.overflowY) &&
+              child.scrollHeight > child.clientHeight) ||
+            (/auto|scroll/.test(style.overflowX) &&
+              child.scrollWidth > child.clientWidth)
+          );
+        }),
+      ),
+      `${width}px queue has no scrollbars`,
+    ).toBe(false);
+    for (const row of [rows.nth(0), rows.nth(1), rows.nth(2)]) {
+      const updated = row.locator("time");
+      await expect(updated).toHaveCount(1);
+      await expect(updated).toHaveAttribute("datetime", task.updatedAt);
+      await expect(updated).toContainText("2026");
+      const timeBox = await updated.boundingBox();
+      const timeCell = await updated
+        .locator("xpath=ancestor::td")
+        .boundingBox();
+      expect(timeBox!.x).toBeGreaterThanOrEqual(timeCell!.x);
+      expect(timeBox!.x + timeBox!.width).toBeLessThanOrEqual(
+        timeCell!.x + timeCell!.width - 14,
+      );
+      expect(timeBox!.y + timeBox!.height).toBeLessThanOrEqual(
+        timeCell!.y + timeCell!.height - 14,
+      );
+      if (width < 1280)
+        await expect(row.getByText("Updated", { exact: true })).toBeVisible();
+      const badge = row.locator("[data-badge-label]");
+      const bounds = await badge.boundingBox();
+      const cell = await badge.locator("xpath=ancestor::td").boundingBox();
+      expect(bounds!.x).toBeGreaterThanOrEqual(cell!.x);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(
+        cell!.x + cell!.width - 14,
+      );
+      expect(
+        await badge.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth,
+        ),
+      ).toBe(true);
+    }
+    const hash = rows.first().locator(`[title="${revision}"]`);
+    await expect(hash).toHaveText(revision);
+    expect(
+      await hash.evaluate((element) => getComputedStyle(element).textOverflow),
+    ).toBe("ellipsis");
+    await rows.first().scrollIntoViewIfNeeded();
+    const before = await page.evaluate(() => window.scrollY);
+    await rows.first().hover();
+    await page.mouse.wheel(0, 500);
+    await expect
+      .poll(() => page.evaluate(() => window.scrollY))
+      .toBeGreaterThan(before);
+    expect(
+      await queue
+        .locator("table")
+        .locator("..")
+        .evaluate((element) => element.scrollTop),
+    ).toBe(0);
+    await rows.last().scrollIntoViewIfNeeded();
+    await expect(rows.last().getByRole("link")).toBeInViewport();
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    const nextFirst = rows.first().getByRole("link", {
+      name: "Comfy-Org/Qwen-Image-2.1-large-model-50",
+      exact: true,
+    });
+    await expect(nextFirst).toBeInViewport();
+    await page.getByRole("button", { name: "Previous", exact: true }).click();
+    await expect(
+      rows.first().getByRole("link", {
+        name: "Comfy-Org/Qwen-Image-2.1-large-model-0",
+        exact: true,
+      }),
+    ).toBeInViewport();
+    await page.evaluate(() => window.scrollTo(0, 0));
+    if ([1440, 1024, 320].includes(width))
+      await page.screenshot({
+        path: testInfo.outputPath(`queue-${width}.png`),
+      });
+  });
+}
+
 test("empty download results show the full message below the table header", async ({
   page,
 }) => {
@@ -181,12 +408,9 @@ test("empty download results show the full message below the table header", asyn
     const search = page.getByRole("textbox", { name: "Search downloads" });
     await page
       .getByRole("region", { name: "Download queue" })
-      .locator("table")
-      .locator("..")
-      .evaluate((element) => {
-        element.scrollTop = 250;
-        element.scrollLeft = 250;
-      });
+      .locator("tbody tr")
+      .last()
+      .scrollIntoViewIfNeeded();
     await search.fill("no-match");
     const queue = page.getByRole("region", { name: "Download queue" });
     const title = queue.getByRole("heading", {
@@ -228,27 +452,30 @@ test("empty download results show the full message below the table header", asyn
 test("queue priority can be changed with a keyboard and retains paused status", async ({
   page,
 }) => {
-  await page.goto("/tasks");
-  const handle = page.getByRole("button", {
-    name: "Move acme/model, priority 1",
-  });
-  await handle.focus();
-  const request = page.waitForRequest((request) =>
-    request.url().endsWith("/paused-task/position"),
-  );
-  await handle.press("ArrowDown");
-  expect((await request).postDataJSON()).toEqual({
-    targetTaskId: "queued-task",
-    after: true,
-  });
-  await expect(
-    page.getByRole("link", { name: "acme/model", exact: true }),
-  ).toBeVisible();
-  await expect(
-    page
-      .getByRole("region", { name: "Download queue" })
-      .getByText("Paused", { exact: true }),
-  ).toBeVisible();
+  for (const width of [1440, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto("/tasks");
+    const handle = page.getByRole("button", {
+      name: "Move acme/model, priority 1",
+    });
+    await handle.focus();
+    const request = page.waitForRequest((request) =>
+      request.url().endsWith("/paused-task/position"),
+    );
+    await handle.press("ArrowDown");
+    expect((await request).postDataJSON()).toEqual({
+      targetTaskId: "queued-task",
+      after: true,
+    });
+    await expect(
+      page.getByRole("link", { name: "acme/model", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByRole("region", { name: "Download queue" })
+        .getByText("Paused", { exact: true }),
+    ).toBeVisible();
+  }
 });
 
 test("revision suggestions can be browsed without clearing the current value", async ({
@@ -571,6 +798,164 @@ test("integration code uses beUI copy feedback and sanitizes Markdown HTML", asy
       .getByRole("heading", { name: "Setup" })
       .evaluate((element) => element.getBoundingClientRect().top),
   ).toBeGreaterThanOrEqual(64);
+});
+
+test("theme preferences override the system, survive reloads, and recolor code", async ({
+  page,
+}, testInfo) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/tasks");
+  const root = page.locator("html");
+  const picker = page
+    .getByRole("group", { name: "Theme", exact: true })
+    .getByRole("button", { name: /^Theme:/ });
+  async function expectMenuFullyVisible() {
+    await expect
+      .poll(async () => {
+        const panel = await page
+          .getByRole("listbox", { name: /^Theme:/ })
+          .boundingBox();
+        const lastOption = await page
+          .getByRole("option", { name: "System", exact: true })
+          .boundingBox();
+        return (
+          !!panel &&
+          !!lastOption &&
+          lastOption.y + lastOption.height <= panel.y + panel.height - 1
+        );
+      })
+      .toBe(true);
+  }
+  await expect(root).toHaveAttribute("data-theme", "light");
+  await expect(picker).toHaveText("Theme:System");
+  const lightBackground = await page
+    .locator("body")
+    .evaluate((el) => getComputedStyle(el).backgroundColor);
+  await picker.focus();
+  await picker.press("Home");
+  await expect(
+    page.getByRole("option", { name: "Light", exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(
+    page.getByRole("option", { name: "Dark", exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(root).toHaveAttribute("data-theme", "dark");
+  await expect(picker).toBeFocused();
+  expect(await root.evaluate((el) => getComputedStyle(el).colorScheme)).toBe(
+    "dark",
+  );
+  await page.reload();
+  await expect(root).toHaveAttribute("data-theme", "dark");
+  await expect(picker).toHaveText("Theme:Dark");
+  await page.route("**/integration.md", (route) =>
+    route.fulfill({
+      contentType: "text/markdown",
+      body: "# Integration\n\n## Setup\n\n```ts\nconst answer = 42;\n```",
+    }),
+  );
+  await page.goto("/integration");
+  const token = page
+    .locator('[data-code-block] span[style*="--agent-code-light"]')
+    .first();
+  await expect(token).toBeVisible();
+  const darkColor = await token.evaluate((el) => getComputedStyle(el).color);
+  await page.emulateMedia({ colorScheme: "dark" });
+  await picker.click();
+  await page.getByRole("option", { name: "Light", exact: true }).click();
+  await expect(root).toHaveAttribute("data-theme", "light");
+  expect(await root.evaluate((el) => getComputedStyle(el).colorScheme)).toBe(
+    "light",
+  );
+  await expect
+    .poll(() => token.evaluate((el) => getComputedStyle(el).color))
+    .not.toBe(darkColor);
+  await expect
+    .poll(() =>
+      page
+        .locator("body")
+        .evaluate((el) => getComputedStyle(el).backgroundColor),
+    )
+    .toBe(lightBackground);
+  await picker.click();
+  await page.getByRole("option", { name: "System", exact: true }).click();
+  await expect(root).toHaveAttribute("data-theme", "dark");
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(root).toHaveAttribute("data-theme", "light");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(root).toHaveAttribute("data-theme", "dark");
+  await page.setViewportSize({ width: 320, height: 844 });
+  await picker.click();
+  await expectMenuFullyVisible();
+  await expect(
+    page.getByRole("option", { name: "System", exact: true }),
+  ).toBeInViewport();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("theme-menu-mobile.png") });
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 1440, height: 844 });
+  await picker.click();
+  await expectMenuFullyVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("theme-menu-desktop.png"),
+  });
+});
+
+test("theme preferences synchronize between tabs", async ({
+  page,
+  context,
+}) => {
+  await page.goto("/tasks");
+  const other = await context.newPage();
+  const errors: string[] = [];
+  other.on("pageerror", (error) => errors.push(error.message));
+  try {
+    await mockShelf(other);
+    await other.goto("/artifacts");
+    await page.getByRole("button", { name: /^Theme:/ }).click();
+    await page.getByRole("option", { name: "Dark", exact: true }).click();
+    await expect(other.getByRole("button", { name: /^Theme:/ })).toHaveText(
+      "Theme:Dark",
+    );
+    await expect(other.locator("html")).toHaveAttribute("data-theme", "dark");
+    await other.getByRole("button", { name: /^Theme:/ }).click();
+    await other.getByRole("option", { name: "Light", exact: true }).click();
+    await expect(page.getByRole("button", { name: /^Theme:/ })).toHaveText(
+      "Theme:Light",
+    );
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    expect(errors).toEqual([]);
+  } finally {
+    await other.close();
+  }
+});
+
+test("login exposes theme selection even when browser storage is unavailable", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    Object.defineProperty(window, "localStorage", {
+      get: () => {
+        throw new Error("Storage disabled");
+      },
+    }),
+  );
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.goto("/login");
+  await page.getByRole("button", { name: /^Theme:/ }).click();
+  await page.getByRole("option", { name: "Dark", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByRole("textbox", { name: "Password" })).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
 });
 
 test("mobile dark mode keeps primary pages and route-driven detail inside the viewport", async ({

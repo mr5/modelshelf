@@ -432,12 +432,18 @@ export function SelectField<T extends string>({
   options,
   onChange,
   className,
+  triggerContent,
+  triggerClassName,
+  contentClassName,
 }: {
   label: string;
   value: T;
   options: ReadonlyArray<{ value: T; label: string }>;
   onChange: (value: T) => void;
   className?: string;
+  triggerContent?: ReactNode;
+  triggerClassName?: string;
+  contentClassName?: string;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
@@ -504,11 +510,11 @@ export function SelectField<T extends string>({
           requestAnimationFrame(() => trigger()?.focus());
         }}
       >
-        <SelectTrigger>
+        <SelectTrigger className={triggerClassName}>
           <span className="sr-only">{label}:</span>
-          <SelectValue />
+          {triggerContent ?? <SelectValue />}
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={contentClassName}>
           <div className="max-h-72 overflow-y-auto overscroll-contain">
             {options.map((option) => (
               <SelectItem key={option.value} value={option.value}>

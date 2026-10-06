@@ -29,13 +29,15 @@ docker run --detach --name "$exporter" --network "$network" --privileged \
     --volume "$volume:/export/artifacts:ro" \
     "$image" >/dev/null
 
+# Drain the log stream: grep -q may close early and make docker logs fail with
+# SIGPIPE under pipefail, even after Ganesha has initialized successfully.
 for _ in $(seq 1 30); do
-    if docker logs "$exporter" 2>&1 | grep -q "NFS SERVER INITIALIZED"; then
+    if docker logs "$exporter" 2>&1 | grep "NFS SERVER INITIALIZED" >/dev/null; then
         break
     fi
     sleep 1
 done
-if ! docker logs "$exporter" 2>&1 | grep -q "NFS SERVER INITIALIZED"; then
+if ! docker logs "$exporter" 2>&1 | grep "NFS SERVER INITIALIZED" >/dev/null; then
     docker logs "$exporter" >&2
     exit 1
 fi
@@ -111,12 +113,12 @@ docker run --detach --name "$public_exporter" --network "$network" --privileged 
     --volume "$volume:/export/artifacts:ro" \
     "$image" >/dev/null
 for _ in $(seq 1 30); do
-    if docker logs "$public_exporter" 2>&1 | grep -q "NFS SERVER INITIALIZED"; then
+    if docker logs "$public_exporter" 2>&1 | grep "NFS SERVER INITIALIZED" >/dev/null; then
         break
     fi
     sleep 1
 done
-if docker logs "$public_exporter" 2>&1 | grep -q "No export entries found"; then
+if docker logs "$public_exporter" 2>&1 | grep "No export entries found" >/dev/null; then
     docker logs "$public_exporter" >&2
     exit 1
 fi

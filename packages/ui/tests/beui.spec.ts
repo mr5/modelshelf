@@ -246,40 +246,40 @@ test("completed revisions open their published artifact on desktop and mobile", 
   }
 });
 
-test("long task lists fit the page, keep badges readable, and scroll with the document", async ({
-  page,
-}, testInfo) => {
-  const revision = "eed8d15085f0b0790d21f0c3cee774f234425390";
-  const statuses = [
-    "completed",
-    "awaiting_confirmation",
-    "downloading",
-    "failed",
-    "paused",
-    "verifying",
-  ] as const;
-  await page.route("**/api/v1/tasks/page?*", (route) => {
-    const offset = Number(
-      new URL(route.request().url()).searchParams.get("offset"),
-    );
-    return route.fulfill({
-      json: {
-        items: Array.from({ length: 50 }, (_, index) => ({
-          ...task,
-          id: `long-task-${offset + index}`,
-          sourceId: `Comfy-Org/Qwen-Image-2.1-large-model-${offset + index}`,
-          provider: "modelscope-cn",
-          resolvedRevision: revision,
-          status: statuses[index % statuses.length],
-          totalBytes: 69 * 1024 ** 3,
-          bytesDownloaded: 69 * 1024 ** 3,
-        })),
-        total: 100,
-        hasMore: offset === 0,
-      },
+for (const width of [1440, 1280, 1024, 768, 767, 390, 320]) {
+  test(`long task lists fit and scroll with the document at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    const revision = "eed8d15085f0b0790d21f0c3cee774f234425390";
+    const statuses = [
+      "completed",
+      "awaiting_confirmation",
+      "downloading",
+      "failed",
+      "paused",
+      "verifying",
+    ] as const;
+    await page.route("**/api/v1/tasks/page?*", (route) => {
+      const offset = Number(
+        new URL(route.request().url()).searchParams.get("offset"),
+      );
+      return route.fulfill({
+        json: {
+          items: Array.from({ length: 50 }, (_, index) => ({
+            ...task,
+            id: `long-task-${offset + index}`,
+            sourceId: `Comfy-Org/Qwen-Image-2.1-large-model-${offset + index}`,
+            provider: "modelscope-cn",
+            resolvedRevision: revision,
+            status: statuses[index % statuses.length],
+            totalBytes: 69 * 1024 ** 3,
+            bytesDownloaded: 69 * 1024 ** 3,
+          })),
+          total: 100,
+          hasMore: offset === 0,
+        },
+      });
     });
-  });
-  for (const width of [1440, 1280, 1024, 768, 767, 390, 320]) {
     await page.setViewportSize({ width, height: 844 });
     await page.goto("/tasks");
     const queue = page.getByRole("region", { name: "Download queue" });
@@ -374,8 +374,8 @@ test("long task lists fit the page, keep badges readable, and scroll with the do
       await page.screenshot({
         path: testInfo.outputPath(`queue-${width}.png`),
       });
-  }
-});
+  });
+}
 
 test("empty download results show the full message below the table header", async ({
   page,

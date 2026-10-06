@@ -1,8 +1,28 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { TriangleAlert } from "lucide-react";
+import { type ReactNode, useId, useState } from "react";
+import {
+  Button,
+  type ButtonSize,
+  type ButtonVariant,
+} from "@/components/motion/button/base";
+import { StatefulButton } from "@/components/motion/button/stateful";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/motion/popover";
+import { CheckRow, Inset } from "@/components/ui";
+
+type Side = "top" | "bottom";
+
+/** The one deliberate restyle: irreversible confirmations use the destructive token. */
+export const destructiveButton =
+  "bg-destructive text-primary-foreground hover:bg-destructive/90";
+type Align = "start" | "center" | "end";
 
 export function DeleteConfirm({
   triggerLabel,
+  triggerIcon,
   title,
   description,
   confirmLabel,
@@ -10,9 +30,13 @@ export function DeleteConfirm({
   optionLabel,
   busyLabel = "Deleting…",
   disabled = false,
-  triggerClassName = "ghost danger-text small",
+  triggerVariant = "ghost",
+  triggerSize = "sm",
+  side = "bottom",
+  align = "end",
 }: {
   triggerLabel: string;
+  triggerIcon?: ReactNode;
   title: string;
   description: string | ((optionChecked: boolean) => string);
   confirmLabel: string;
@@ -20,66 +44,21 @@ export function DeleteConfirm({
   optionLabel?: string;
   busyLabel?: string;
   disabled?: boolean;
-  triggerClassName?: string;
+  triggerVariant?: ButtonVariant;
+  triggerSize?: ButtonSize;
+  side?: Side;
+  align?: Align;
 }) {
   const titleId = useId();
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const popoverRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [optionChecked, setOptionChecked] = useState(false);
-  const [position, setPosition] = useState({ left: 12, top: 12 });
 
-  useLayoutEffect(() => {
-    if (!open) return;
-    const place = () => {
-      const trigger = triggerRef.current?.getBoundingClientRect();
-      const popover = popoverRef.current;
-      if (!trigger || !popover) return;
-      const gap = 8;
-      const edge = 12;
-      const width = popover.offsetWidth;
-      const height = popover.offsetHeight;
-      const left = Math.min(
-        Math.max(edge, trigger.right - width),
-        window.innerWidth - width - edge,
-      );
-      const below = trigger.bottom + gap;
-      const top = below + height <= window.innerHeight - edge
-        ? below
-        : Math.max(edge, trigger.top - height - gap);
-      setPosition({ left, top });
-    };
-    place();
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (!triggerRef.current?.contains(target) && !popoverRef.current?.contains(target)) {
-        setOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-        triggerRef.current?.focus();
-      }
-    };
-    document.addEventListener("mousedown", close);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [open]);
+  function changeOpen(next: boolean) {
+    if (busy) return;
+    if (!next) setOptionChecked(false);
+    setOpen(next);
+  }
 
   async function confirm() {
     setBusy(true);
@@ -93,35 +72,84 @@ export function DeleteConfirm({
     }
   }
 
-  return <span className="delete-confirm">
-    <button
-      ref={triggerRef}
-      className={triggerClassName}
-      disabled={disabled || busy}
-      aria-haspopup="dialog"
-      aria-expanded={open}
-      onClick={() => setOpen((current) => {
-        if (current) setOptionChecked(false);
-        return !current;
-      })}
-    >{triggerLabel}</button>
-    {open && createPortal(<div
-      ref={popoverRef}
-      className="delete-popover"
-      role="dialog"
-      aria-modal="false"
-      aria-labelledby={titleId}
-      style={{ left: position.left, top: position.top }}
+  return (
+    <Popover
+      open={open}
+      onOpenChange={changeOpen}
+      side={side}
+      align={align}
+      sideOffset={10}
     >
-      <div className="delete-popover-copy">
-        <span className="delete-popover-icon" aria-hidden="true">!</span>
-        <div><strong id={titleId}>{title}</strong><p>{typeof description === "function" ? description(optionChecked) : description}</p></div>
-      </div>
-      {optionLabel && <label className="delete-popover-option"><input type="checkbox" checked={optionChecked} disabled={busy} onChange={(event) => setOptionChecked(event.target.checked)} /><span>{optionLabel}</span></label>}
-      <div className="delete-popover-actions">
-        <button className="ghost small" disabled={busy} onClick={() => { setOpen(false); setOptionChecked(false); triggerRef.current?.focus(); }}>Cancel</button>
-        <button className="danger small" disabled={busy} onClick={() => void confirm()}>{busy ? busyLabel : confirmLabel}</button>
-      </div>
-    </div>, document.body)}
-  </span>;
+      <PopoverTrigger>
+        <Button
+          variant={triggerVariant}
+          size={triggerSize}
+          disabled={disabled || busy}
+          aria-label={
+            triggerIcon && triggerSize === "icon" ? triggerLabel : undefined
+          }
+          title={
+            triggerIcon && triggerSize === "icon" ? triggerLabel : undefined
+          }
+        >
+          {triggerIcon}
+          {!(triggerIcon && triggerSize === "icon") && triggerLabel}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[min(340px,calc(100vw-24px))]">
+        <div role="group" aria-labelledby={titleId} className="grid gap-4 p-4">
+          <div className="grid grid-cols-[28px_minmax(0,1fr)] items-start gap-2.5">
+            <span
+              className="grid size-7 place-items-center rounded-full bg-destructive/10 text-destructive"
+              aria-hidden
+            >
+              <TriangleAlert className="size-3.5" />
+            </span>
+            <div>
+              <strong
+                id={titleId}
+                className="mb-1 mt-px block text-sm leading-tight"
+              >
+                {title}
+              </strong>
+              <p className="text-xs leading-normal text-muted-foreground">
+                {typeof description === "function"
+                  ? description(optionChecked)
+                  : description}
+              </p>
+            </div>
+          </div>
+          {optionLabel && (
+            <Inset className="p-3">
+              <CheckRow
+                checked={optionChecked}
+                disabled={busy}
+                onCheckedChange={setOptionChecked}
+                title={optionLabel}
+              />
+            </Inset>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={() => changeOpen(false)}
+            >
+              Cancel
+            </Button>
+            <StatefulButton
+              size="sm"
+              state={busy ? "loading" : "idle"}
+              loadingText={busyLabel}
+              className={destructiveButton}
+              onClick={() => void confirm()}
+            >
+              {confirmLabel}
+            </StatefulButton>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }

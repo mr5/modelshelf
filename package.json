@@ -1,6 +1,6 @@
 {
   "name": "modelshelf",
-  "version": "0.1.0-beta.27",
+  "version": "0.1.0-beta.28",
   "private": true,
   "packageManager": "pnpm@11.22.0",
   "scripts": {
@@ -8,7 +8,8 @@
     "build": "pnpm --filter @modelshelf/ui build",
     "dev": "pnpm --filter @modelshelf/ui dev",
     "typecheck": "pnpm --filter @modelshelf/ui typecheck",
-    "format": "prettier --write packages/ui"
+    "format": "prettier --write packages/ui",
+    "test:ui:browser": "pnpm --filter @modelshelf/ui test:browser"
   },
   "devDependencies": {
     "prettier": "^3.6.2"

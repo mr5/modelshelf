@@ -14,3 +14,7 @@ packages/client/dist/
 *.log
 data/
 packages/ui/public/config.js
+
+.pnpm-store/
+playwright-report/
+test-results/

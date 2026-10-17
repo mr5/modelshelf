@@ -1864,6 +1864,16 @@ def _modelscope_git_environment(token: str | None, *, skip_lfs: bool) -> dict[st
                 "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credential}",
             }
         )
+    # Separate HTTP/1.1 connections keep LFS file transfers from sharing one
+    # HTTP/2 connection, which can bottleneck large downloads on some routes.
+    config_index = int(environment.get("GIT_CONFIG_COUNT", "0"))
+    environment.update(
+        {
+            "GIT_CONFIG_COUNT": str(config_index + 1),
+            f"GIT_CONFIG_KEY_{config_index}": "http.version",
+            f"GIT_CONFIG_VALUE_{config_index}": "HTTP/1.1",
+        }
+    )
     return environment
 
 

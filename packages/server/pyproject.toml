@@ -1,6 +1,6 @@
 [project]
 name = "modelshelf-server"
-version = "0.1.0b29"
+version = "0.1.0b30"
 description = "ModelShelf API and ingestion worker"
 requires-python = ">=3.12"
 dependencies = [

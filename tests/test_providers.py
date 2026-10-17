@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -61,6 +62,30 @@ def test_modelscope_sites_use_independent_endpoints_and_tokens(
     )
     assert provider_module._modelscope_token(Provider.MODELSCOPE_CN) == "cn-token"
     assert provider_module._modelscope_token(Provider.MODELSCOPE_AI) == "ai-token"
+
+
+@pytest.mark.parametrize("token", [None, "test-modelscope-token"])
+def test_modelscope_git_uses_http1_for_downloads_and_child_filters(
+    token: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "http.version")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "HTTP/2")
+    environment = provider_module._modelscope_git_environment(token, skip_lfs=True)
+    # Invoke Git itself so config precedence and credential coexistence are checked.
+    version = subprocess.check_output(
+        ["git", "config", "--get", "http.version"], cwd=tmp_path, env=environment, text=True
+    )
+    assert version.strip() == "HTTP/1.1"
+    if token:
+        header = subprocess.check_output(
+            ["git", "config", "--get", "http.extraHeader"],
+            cwd=tmp_path,
+            env=environment,
+            text=True,
+        )
+        assert header.startswith("Authorization: Basic ")
+    assert environment["GIT_LFS_SKIP_SMUDGE"] == "1"
 
 
 def test_empty_huggingface_token_is_treated_as_anonymous(

@@ -1643,3 +1643,71 @@ def test_scheduler_enforces_global_and_per_source_limits_without_head_of_line_bl
             await manager.stop()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("provider", [Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI])
+def test_retry_repairs_retained_modelscope_pointer_with_cached_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: Provider
+) -> None:
+    catalog = Catalog(tmp_path / "storage")
+    catalog.initialize()
+    manager = TaskManager(catalog, github_token=None)
+    revision = "a" * 40
+    weights = b"downloaded weights"
+    merges = b"merge rules\n"
+    oid = hashlib.sha256(merges).hexdigest()
+    task = manager.store.create(
+        provider, "owner/model", "master", resolved_revision=revision,
+        total_bytes=len(weights) + len(merges), disable_mirror=False, disable_proxy=False,
+    )
+    manager.store.update(task.id, {"status": TaskStatus.FAILED, "resume_from_stage": True})
+    stage = catalog.staging_path(task.id)
+    root = stage / "artifact"
+    root.mkdir(parents=True)
+    weight_path = root / "model.bin"
+    weight_path.write_bytes(weights)
+    weight_inode = weight_path.stat().st_ino
+    (root / "merges.txt").write_text(
+        f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {len(merges)}\n"
+    )
+    cached = stage / ".modelscope-git/lfs/objects/cached-weights"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(weights)
+    manager._save_provider_result(stage, ProviderResult(
+        resolved_revision=revision, expected_sha256={"merges.txt": oid},
+        fetched_paths=["merges.txt"],
+    ))
+    attempts = 0
+
+    async def repair(
+        actual_provider: Provider, _source: str, _revision: str, destination: Path,
+        _progress: Progress, **options: object,
+    ) -> ProviderResult:
+        nonlocal attempts
+        attempts += 1
+        assert actual_provider == provider
+        assert options["expected_resolved_revision"] == revision
+        assert (destination / ".git/lfs/objects/cached-weights").read_bytes() == weights
+        assert weight_path.stat().st_ino == weight_inode
+        assert weight_path.read_bytes() == weights
+        (destination / "merges.txt").write_bytes(merges)
+        return ProviderResult(
+            resolved_revision=revision, expected_sha256={"merges.txt": oid},
+            fetched_paths=["merges.txt"],
+        )
+
+    monkeypatch.setattr(task_module, "run_provider", repair)
+
+    async def exercise() -> None:
+        await manager.start()
+        try:
+            await manager.resume(task.id)
+            await asyncio.wait_for(manager.queue.join(), timeout=3)
+            completed = manager.store.get(task.id)
+            assert completed is not None
+            assert completed.status == TaskStatus.COMPLETED, completed.error
+        finally:
+            await manager.stop()
+
+    asyncio.run(exercise())
+    assert attempts == 1

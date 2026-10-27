@@ -35,7 +35,13 @@ from modelshelf_core.identity import artifact_identity
 from modelshelf_core.schema import load_task_json
 
 from .archive import extract_archive, infer_metadata
-from .providers import ProviderResult, ReuseStats, provider_failure_detail, run_provider
+from .providers import (
+    ProviderResult,
+    ReuseStats,
+    modelscope_has_lfs_pointers,
+    provider_failure_detail,
+    run_provider,
+)
 
 _PROVIDER_RESULT_SCHEMA_VERSION = 1
 _VERIFICATION_WORKERS = 2
@@ -1304,6 +1310,23 @@ class TaskManager:
             )
             download_root.mkdir(parents=True, exist_ok=True)
             result = self._load_provider_result(stage) if resume_from_stage else None
+            if task.provider in {Provider.MODELSCOPE_CN, Provider.MODELSCOPE_AI}:
+                if result is not None and await asyncio.to_thread(
+                    modelscope_has_lfs_pointers, download_root
+                ):
+                    # Older downloads could finish with unexpanded LFS pointers.
+                    # Re-enter the isolated provider with the locked commit and
+                    # retained LFS cache, rather than repeating verification alone.
+                    self._provider_result_path(stage).unlink(missing_ok=True)
+                    self._inventory_path(stage).unlink(missing_ok=True)
+                    result = None
+                retained_git = stage / ".modelscope-git"
+                if (
+                    result is None
+                    and retained_git.exists()
+                    and not (download_root / ".git").exists()
+                ):
+                    retained_git.rename(download_root / ".git")
             if result is None:
                 await self._update(
                     task_id,

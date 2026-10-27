@@ -1751,6 +1751,16 @@ async def _download_modelscope_git(
                 )
         else:
             _checked_modelscope_git(["git", "-C", str(destination), "lfs", "pull"], environment)
+        # Some upstream repositories commit LFS pointers without matching
+        # .gitattributes rules. Pull/checkout can succeed while leaving those
+        # pointers untouched. Smudge explicitly by object ID, reusing the LFS
+        # cache and retaining the pointer until replacement succeeds.
+        for relative, object_id, size in missing_lfs:
+            path = destination / relative
+            if _modelscope_lfs_pointer(path) is not None:
+                _materialize_modelscope_lfs_pointer(
+                    destination, relative, object_id, size, environment
+                )
         if selected is not None:
             for path in worktree_paths:
                 relative_text = path.relative_to(destination).as_posix()
@@ -1808,6 +1818,48 @@ async def _download_modelscope_git(
     if incremental and transfer_total[0] is not None:
         await progress(transfer_total[0], transfer_total[0])
     return ModelScopeGitResult(expected_sha256, sorted(fetched_paths), observed_reuse[0])
+
+
+def modelscope_has_lfs_pointers(root: Path) -> bool:
+    return any(
+        _modelscope_lfs_pointer(path) is not None
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(root).parts
+    )
+
+
+def _materialize_modelscope_lfs_pointer(
+    destination: Path,
+    relative: Path,
+    object_id: str,
+    size: int,
+    environment: dict[str, str],
+) -> None:
+    path = destination / relative
+    pointer = (
+        f"version https://git-lfs.github.com/spec/v1\n"
+        f"oid sha256:{object_id}\nsize {size}\n"
+    ).encode()
+    temporary = path.with_name(f".{path.name}.modelshelf-lfs-{uuid4()}")
+    try:
+        with temporary.open("xb") as output:
+            result = subprocess.run(
+                ["git", "-C", str(destination), "lfs", "smudge", "--", relative.as_posix()],
+                input=pointer,
+                stdout=output,
+                stderr=subprocess.PIPE,
+                env=environment,
+                check=False,
+            )
+        if result.returncode != 0:
+            detail = safe_error_message(result.stderr.decode(errors="replace").strip())
+            raise ProviderRequestError(f"ModelScope LFS materialization failed: {detail}")
+        if temporary.stat().st_size != size or _modelscope_lfs_pointer(temporary) is not None:
+            raise ProviderRequestError(f"ModelScope LFS object was not materialized: {relative}")
+        # The manifest inventory still verifies the source SHA-256.
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _modelscope_lfs_include(paths: list[str]) -> str | None:

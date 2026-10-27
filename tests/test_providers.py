@@ -1244,3 +1244,122 @@ def test_sdk_proxy_bypass_uses_an_isolated_provider_process(
 
     asyncio.run(run())
     assert captured["disable_mirror"] is False
+
+
+@pytest.mark.parametrize("selected", [None, ["merges.txt", "model.bin"]])
+def test_modelscope_materializes_pointers_missing_lfs_attributes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected: list[str] | None
+) -> None:
+    destination = tmp_path / "artifact"
+    payload = b"actual merge rules\n"
+    oid = hashlib.sha256(payload).hexdigest()
+    weights = b"already downloaded weights"
+    smudged: list[str] = []
+
+    def checkout(*_args: object, **_kwargs: object) -> dict[str, str]:
+        destination.mkdir()
+        (destination / ".git").mkdir()
+        (destination / "merges.txt").write_text(
+            f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\n"
+            f"size {len(payload)}\n"
+        )
+        (destination / "model.bin").write_bytes(weights)
+        return {"GIT_LFS_SKIP_SMUDGE": "1"}
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        if "smudge" in command:
+            assert command[-1] == "merges.txt"
+            assert "GIT_LFS_SKIP_SMUDGE" not in kwargs["env"]
+            kwargs["stdout"].write(payload)
+            smudged.append(command[-1])
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(provider_module, "_prepare_modelscope_git_checkout", checkout)
+    monkeypatch.setattr(provider_module, "_checked_modelscope_git", lambda *_args: "")
+    monkeypatch.setattr(provider_module.subprocess, "run", run)
+    result = asyncio.run(provider_module._download_modelscope_git(
+        "owner/model", "master", "a" * 40, destination,
+        lambda *_args: asyncio.sleep(0), "https://modelscope.test", None,
+        selected_paths=selected,
+    ))
+    assert smudged == ["merges.txt"]
+    assert (destination / "merges.txt").read_bytes() == payload
+    assert (destination / "model.bin").read_bytes() == weights
+    assert result.expected_sha256 == {"merges.txt": oid}
+    assert result.fetched_paths == ["merges.txt"]
+
+
+@pytest.mark.parametrize("failure", ["exit", "pointer", "truncated"])
+def test_modelscope_failed_smudge_preserves_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    payload = b"merge rules"
+    oid = hashlib.sha256(payload).hexdigest()
+    path = tmp_path / "merges.txt"
+    pointer = (
+        f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\n"
+        f"size {len(payload)}\n"
+    ).encode()
+    path.write_bytes(pointer)
+
+    def run(_command: list[str], **kwargs: object) -> SimpleNamespace:
+        kwargs["stdout"].write(pointer if failure == "pointer" else b"partial")
+        return SimpleNamespace(returncode=1 if failure == "exit" else 0, stderr=b"failed")
+
+    monkeypatch.setattr(provider_module.subprocess, "run", run)
+    with pytest.raises(provider_module.ProviderRequestError):
+        provider_module._materialize_modelscope_lfs_pointer(
+            tmp_path, Path("merges.txt"), oid, len(payload), {}
+        )
+    assert path.read_bytes() == pointer
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_modelscope_real_lfs_repairs_missing_attributes_from_retained_cache(tmp_path: Path) -> None:
+    import shutil
+
+    if shutil.which("git-lfs") is None:
+        pytest.skip("git-lfs is required for the offline LFS integration test")
+    destination = tmp_path / "artifact"
+    destination.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(destination), *args], text=True
+        ).strip()
+
+    git("init", "--quiet")
+    git("config", "remote.origin.url", "https://modelscope.invalid/owner/model.git")
+    (destination / ".gitattributes").write_text("*.bin filter=lfs diff=lfs merge=lfs -text\n")
+    contents = {"merges.txt": b"merge rules\n", "model.bin": b"cached model weights"}
+    expected = {}
+    for name, payload in contents.items():
+        oid = hashlib.sha256(payload).hexdigest()
+        expected[name] = oid
+        (destination / name).write_text(
+            f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\n"
+            f"size {len(payload)}\n"
+        )
+        cached = destination / ".git/lfs/objects" / oid[:2] / oid[2:4] / oid
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_bytes(payload)
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture")
+    revision = git("rev-parse", "HEAD")
+    # Reproduce the metadata move performed before a failed verification.
+    retained = tmp_path / ".modelscope-git"
+    (destination / ".git").rename(retained)
+    weight_oid = expected["model.bin"]
+    cache_relative = Path("lfs/objects") / weight_oid[:2] / weight_oid[2:4] / weight_oid
+    weight_cache = retained / cache_relative
+    cache_inode = weight_cache.stat().st_ino
+    retained.rename(destination / ".git")
+    result = asyncio.run(provider_module._download_modelscope_git(
+        "owner/model", revision, revision, destination,
+        lambda *_args: asyncio.sleep(0), "https://modelscope.invalid", None,
+    ))
+    assert result.expected_sha256 == expected
+    for name, payload in contents.items():
+        assert (destination / name).read_bytes() == payload
+    weight_cache = destination / ".git" / cache_relative
+    assert weight_cache.stat().st_ino == cache_inode

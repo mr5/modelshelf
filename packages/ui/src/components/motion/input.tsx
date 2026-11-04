@@ -66,6 +66,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
     disabled,
     id: idProp,
     type,
+    "aria-describedby": describedBy,
     ...rest
   },
   ref,
@@ -104,9 +105,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
   };
 
   return (
-    <div
-      className={cn("flex flex-col gap-1.5", className, classNames?.root)}
-    >
+    <div className={cn("flex flex-col gap-1.5", className, classNames?.root)}>
       {label ? (
         <label
           htmlFor={id}
@@ -131,8 +130,9 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
                 : "idle"
         }
         className={cn(
-          "relative h-11 overflow-hidden rounded-full border transition-colors duration-200",
-          "border-border",
+          "relative h-11 rounded-xl border bg-background transition-colors duration-200",
+          "border-input hover:border-border-strong",
+          "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-ring",
           focused && !hasError && "border-foreground/40 ring-2 ring-ring/40",
           hasError && "border-destructive ring-2 ring-destructive/25",
           disabled && "opacity-60",
@@ -141,6 +141,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
       >
         {leftIcon ? (
           <span
+            aria-hidden="true"
             className={cn(
               "pointer-events-none absolute left-3 top-1/2 flex -translate-y-1/2 items-center text-muted-foreground [&_svg]:h-4 [&_svg]:w-4",
               classNames?.leftIcon,
@@ -157,7 +158,11 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
           value={value}
           disabled={disabled}
           aria-invalid={hasError || undefined}
-          aria-describedby={errorMessage ? `${id}-error` : undefined}
+          aria-describedby={
+            [describedBy, errorMessage ? `${id}-error` : undefined]
+              .filter(Boolean)
+              .join(" ") || undefined
+          }
           {...rest}
           onChange={(e) => handleChange(e.target.value)}
           onFocus={(event) => {
@@ -170,7 +175,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
           }}
           className={cn(
             "peer h-full w-full bg-transparent text-base leading-6 text-foreground caret-foreground outline-none",
-            "placeholder:text-muted-foreground/60",
+            "placeholder:text-muted-foreground",
             leftIcon ? "pl-10" : "pl-3.5",
             rightSlot || success ? "pr-10" : "pr-3.5",
             disabled && "cursor-not-allowed",
@@ -180,6 +185,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
 
         {success ? (
           <motion.svg
+            aria-hidden="true"
             viewBox="0 0 24 24"
             fill="none"
             className={cn(

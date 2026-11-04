@@ -47,6 +47,8 @@ function headingId(value: string) {
 }
 
 function renderMarkdown(markdown: string) {
+  const headings: Array<{ id: string; title: string }> = [];
+  const usedIds = new Map<string, number>();
   const blocks: Array<{
     code: string;
     language: AgentCodeLanguage;
@@ -54,7 +56,12 @@ function renderMarkdown(markdown: string) {
   const renderer = new marked.Renderer();
   renderer.heading = function ({ tokens, depth, text }) {
     const content = this.parser.parseInline(tokens);
-    return `<h${depth} id="${headingId(text)}">${content}</h${depth}>`;
+    const base = headingId(text);
+    const count = usedIds.get(base) ?? 0;
+    usedIds.set(base, count + 1);
+    const id = count ? `${base}-${count}` : base;
+    if (depth === 2) headings.push({ id, title: text.replace(/[*_`]/g, "") });
+    return `<h${depth} id="${id}">${content}</h${depth}>`;
   };
   renderer.code = ({ text, lang }) => {
     const requested =
@@ -69,7 +76,7 @@ function renderMarkdown(markdown: string) {
   const rendered = marked.parse(markdown, { renderer });
   if (typeof rendered !== "string")
     throw new Error("Markdown renderer returned no document");
-  return { html: DOMPurify.sanitize(rendered), blocks };
+  return { html: DOMPurify.sanitize(rendered), blocks, headings };
 }
 
 export function IntegrationPage() {
@@ -153,7 +160,44 @@ export function IntegrationPage() {
         </Panel>
       )}
       {rendered && (
-        <MarkdownArticle html={rendered.html} articleRef={articleRef} />
+        <div className="grid min-w-0 items-start gap-8 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-12">
+          {rendered.headings.length > 0 && (
+            <aside
+              className="rounded-2xl border border-border bg-card p-4 lg:sticky lg:top-24"
+              aria-label="On this page"
+            >
+              <p className="mb-3 px-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                On this page
+              </p>
+              <ul className="grid gap-1">
+                {rendered.headings.map((heading) => (
+                  <li key={heading.id}>
+                    <a
+                      className="flex min-h-11 items-center rounded-lg px-2 py-2 text-sm leading-relaxed text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
+                      href={`#${heading.id}`}
+                      onClick={() => {
+                        requestAnimationFrame(() => {
+                          const target = document.getElementById(heading.id);
+                          target?.setAttribute("tabindex", "-1");
+                          target?.focus({ preventScroll: true });
+                        });
+                      }}
+                    >
+                      {heading.title}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </aside>
+          )}
+          <div
+            className={
+              rendered.headings.length ? "min-w-0" : "min-w-0 lg:col-span-2"
+            }
+          >
+            <MarkdownArticle html={rendered.html} articleRef={articleRef} />
+          </div>
+        </div>
       )}
       {rendered &&
         codeTargets.map((target, index) => {

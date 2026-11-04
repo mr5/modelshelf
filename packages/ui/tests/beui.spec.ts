@@ -986,3 +986,136 @@ test("mobile dark mode keeps primary pages and route-driven detail inside the vi
     });
   }
 });
+
+test("artifact filters survive detail routes, reload and browser history without document navigation", async ({
+  page,
+}) => {
+  await page.goto("/artifacts?q=model&provider=huggingface&sort=name%3Aasc");
+  const search = page.getByRole("textbox", { name: "Search artifacts" });
+  await expect(search).toHaveValue("model");
+  const documentToken = await page.evaluate(() => {
+    const value = crypto.randomUUID();
+    document.documentElement.dataset.navigationToken = value;
+    return value;
+  });
+  await page.getByRole("button", { name: "View details", exact: true }).click();
+  await expect(page).toHaveURL(
+    /\/artifacts\/artifact-one\?q=model&provider=huggingface&sort=name%3Aasc$/,
+  );
+  await page.goBack();
+  await expect(search).toHaveValue("model");
+  await page.goForward();
+  await expect(
+    page.getByRole("dialog", { name: "Artifact details" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(search).toHaveValue("model");
+  await page.getByRole("link", { name: "Downloads", exact: true }).click();
+  await expect(page.locator("#main-content")).toBeFocused();
+  expect(await page.locator("html").getAttribute("data-navigation-token")).toBe(
+    documentToken,
+  );
+  await page.goBack();
+  await page.reload();
+  await expect(search).toHaveValue("model");
+  await page
+    .getByRole("button", { name: "Reset filters", exact: true })
+    .click();
+  await expect(page).toHaveURL(/\/artifacts$/);
+  await expect(search).toHaveValue("");
+});
+
+test("login password visibility preserves input and exposes an accessible state", async ({
+  page,
+}) => {
+  await page.goto("/login");
+  const password = page.getByLabel("Password", { exact: true });
+  await password.fill("example-password");
+  await expect(password).toHaveAttribute("type", "password");
+  await page.getByRole("button", { name: "Show password" }).click();
+  await expect(password).toHaveAttribute("type", "text");
+  await expect(password).toHaveValue("example-password");
+  await expect(
+    page.getByRole("button", { name: "Hide password" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Hide password" }).click();
+  await expect(password).toHaveAttribute("type", "password");
+});
+
+test("guide contents resolve duplicate headings and keep keyboard focus below the header", async ({
+  page,
+}) => {
+  await page.route("**/integration.md", (route) =>
+    route.fulfill({
+      contentType: "text/markdown",
+      body:
+        "# Integration\n\nIntro.\n\n## Setup\n\n" +
+        "Instructions.\n\n".repeat(35) +
+        "## Setup\n\nSecond setup.\n\n" +
+        "Instructions.\n\n".repeat(35),
+    }),
+  );
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto("/integration");
+  const contents = page.getByRole("complementary", { name: "On this page" });
+  await contents
+    .getByRole("link", { name: "Setup", exact: true })
+    .nth(1)
+    .click();
+  await expect(page).toHaveURL(/#setup-1$/);
+  const heading = page.locator("#setup-1");
+  await expect(heading).toBeFocused();
+  const header = await page.locator("header").first().boundingBox();
+  expect((await heading.boundingBox())!.y).toBeGreaterThanOrEqual(
+    header!.height,
+  );
+});
+
+test("all screens fit small portrait and landscape layouts in both themes", async ({
+  page,
+}, testInfo) => {
+  await page.route("**/integration.md", (route) =>
+    route.fulfill({
+      contentType: "text/markdown",
+      body: "# Integration\n\nUse the shelf.\n\n## Setup\n\nConnect your client.",
+    }),
+  );
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+    for (const viewport of [
+      { width: 375, height: 812 },
+      { width: 812, height: 375 },
+    ]) {
+      await page.setViewportSize(viewport);
+      for (const path of [
+        "/login",
+        "/tasks",
+        "/tasks/new",
+        "/tasks/paused-task",
+        "/artifacts",
+        "/artifacts/artifact-one",
+        "/integration",
+      ]) {
+        await page.goto(path);
+        await expect(page.getByRole("heading").first()).toBeVisible();
+        if (path === "/integration")
+          await expect(page.locator("article")).toBeVisible();
+        if (path === "/artifacts")
+          await expect(page.getByRole("button", { name: "View details", exact: true })).toBeVisible();
+        if (path === "/tasks/paused-task" || path === "/artifacts/artifact-one")
+          await expect(page.getByRole("dialog")).toBeVisible();
+        expect(
+          await page.evaluate(
+            () => document.documentElement.scrollWidth <= innerWidth,
+          ),
+          `${colorScheme} ${viewport.width}px ${path}`,
+        ).toBe(true);
+        await page.screenshot({
+          path: testInfo.outputPath(
+            `${colorScheme}-${viewport.width}-${path.replaceAll("/", "_")}.png`,
+          ),
+        });
+      }
+    }
+  }
+});

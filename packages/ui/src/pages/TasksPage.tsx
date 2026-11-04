@@ -525,11 +525,9 @@ export function TasksPage() {
         title="Downloads"
         description={
           <>
-            Every request resolves to an immutable revision before publication.
+            Manage downloads, review progress and prioritize your queue.
             {limits &&
               ` Up to ${limits.maxConcurrent} tasks run at once, with ${limits.maxConcurrentPerSource} per source.`}{" "}
-            Drag queued or paused tasks to set their priority. Paused tasks
-            remain paused.
           </>
         }
         actions={
@@ -548,10 +546,11 @@ export function TasksPage() {
           <ErrorBox>Could not reorder downloads: {queueError}</ErrorBox>
         )}
       </div>
-      <div className="relative z-20 mb-4 grid items-end gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(260px,1fr)_220px_240px]">
+      <div className="relative z-20 mb-5 grid items-end gap-4 rounded-2xl border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-[minmax(260px,1fr)_220px_240px]">
         <Input
           className="sm:col-span-2 lg:col-span-1"
           aria-label="Search downloads"
+          label="Search downloads"
           placeholder="Search model ID or revision…"
           leftIcon={<Search />}
           value={query}
@@ -572,11 +571,35 @@ export function TasksPage() {
           }
         />
       </div>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs leading-relaxed text-muted-foreground">
+        <span role="status">
+          {loading
+            ? "Updating downloads…"
+            : `${total.toLocaleString()} matching downloads`}
+        </span>
+        {(query || provider || statusFilter !== "active-paused") && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() =>
+              updateFilters({
+                q: "",
+                provider: "",
+                statusFilter: "active-paused",
+                offset: 0,
+              })
+            }
+          >
+            Reset filters
+          </Button>
+        )}
+        <span>Reorder with the grip or focus it and use ↑ / ↓.</span>
+      </div>
       <div
         ref={queueRef}
         role="region"
         aria-label="Download queue"
-        className="scroll-mt-20 overflow-hidden rounded-3xl border border-border bg-background"
+        className="scroll-mt-32 overflow-hidden rounded-2xl border border-border bg-card shadow-(--surface-shadow) sm:scroll-mt-20"
         onDragOver={(event) => {
           const target = queueRow(event.target);
           if (target) markQueueDrop(event, target.task.id, target.row);
@@ -611,8 +634,15 @@ export function TasksPage() {
         />
         {queueEmpty && (
           <EmptyState title="No matching downloads">
-            Change the keyword, source or status filters, or create a new
-            download.
+            <p>
+              Change the keyword, source or status filters, or create a new
+              download.
+            </p>
+            <div className="mt-4">
+              <Button variant="outline" onClick={() => navigate("/tasks/new")}>
+                New download
+              </Button>
+            </div>
           </EmptyState>
         )}
       </div>

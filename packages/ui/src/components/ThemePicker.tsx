@@ -77,8 +77,8 @@ export function ThemePicker() {
       value={theme.preference}
       options={options}
       onChange={theme.setPreference}
-      className="w-8 shrink-0 sm:w-32 [&>span]:sr-only"
-      triggerClassName="h-8 justify-center px-2 sm:justify-between sm:px-3 [&>span:last-child]:hidden sm:[&>span:last-child]:inline-flex"
+      className="w-11 shrink-0 sm:w-32 [&>span]:sr-only"
+      triggerClassName="h-11 justify-center px-2 sm:justify-between sm:px-3 [&>span:last-child]:hidden sm:[&>span:last-child]:inline-flex"
       contentClassName="left-auto min-w-40"
       triggerContent={
         <>

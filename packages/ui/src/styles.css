@@ -5,11 +5,11 @@
 :root {
   color-scheme: light;
   /* beUI "Current" tokens, with ModelShelf green as the primary action colour. */
-  --background: oklch(99% 0.002 160);
+  --background: oklch(97.5% 0.004 160);
   --foreground: oklch(19% 0.012 170);
-  --card: oklch(97% 0.004 160);
-  --muted-foreground: oklch(50% 0.014 170);
-  --border: oklch(19% 0.012 170 / 0.08);
+  --card: oklch(100% 0 0);
+  --muted-foreground: oklch(46% 0.014 170);
+  --border: oklch(19% 0.012 170 / 0.13);
   --border-strong: oklch(19% 0.012 170 / 0.15);
   --danger: oklch(57% 0.19 27);
   --success: oklch(62% 0.13 162);
@@ -21,12 +21,14 @@
   --primary-foreground: oklch(99% 0 0);
   --secondary: var(--card);
   --secondary-foreground: var(--foreground);
-  --muted: var(--card);
+  --muted: oklch(94% 0.006 160);
   --accent: oklch(91% 0.19 118);
   --accent-foreground: oklch(22% 0.04 120);
   --destructive: var(--danger);
-  --input: var(--border);
-  --ring: var(--border-strong);
+  --input: var(--border-strong);
+  --ring: var(--primary);
+  --surface-shadow: 0 2px 8px oklch(19% 0.012 170 / 0.025);
+  --overlay: oklch(10% 0.01 170 / 0.45);
 }
 
 :root.dark {
@@ -34,9 +36,12 @@
   --background: oklch(17% 0.006 170);
   --foreground: oklch(95% 0.004 160);
   --card: oklch(21% 0.007 170);
-  --muted-foreground: oklch(66% 0.012 165);
-  --border: oklch(100% 0 0 / 0.07);
-  --border-strong: oklch(100% 0 0 / 0.13);
+  --muted-foreground: oklch(73% 0.012 165);
+  --border: oklch(100% 0 0 / 0.13);
+  --border-strong: oklch(100% 0 0 / 0.24);
+  --muted: oklch(26% 0.009 170);
+  --surface-shadow: 0 2px 8px oklch(0% 0 0 / 0.08);
+  --overlay: oklch(0% 0 0 / 0.65);
   --danger: oklch(66% 0.18 25);
   --primary: oklch(70% 0.12 165);
   --primary-foreground: oklch(17% 0.03 170);
@@ -91,10 +96,14 @@
 @layer base {
   html {
     font-synthesis: none;
+    scroll-padding-top: 144px;
+    @media (min-width: 640px) {
+      scroll-padding-top: 88px;
+    }
   }
   body {
     min-width: 320px;
-    min-height: 100vh;
+    min-height: 100dvh;
     background: var(--background);
     color: var(--foreground);
     font-family: var(--font-sans);
@@ -104,6 +113,22 @@
   [role="button"]:not(:disabled),
   a {
     cursor: pointer;
+    touch-action: manipulation;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 3px;
+  }
+  [tabindex="-1"]:focus {
+    outline: none;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
   }
   ::selection {
     background: color-mix(in oklch, var(--primary) 25%, transparent);
@@ -124,10 +149,10 @@
 /* Rendered integration Markdown: generated HTML, so it is styled by element. */
 @layer components {
   .integration-markdown {
-    max-width: 920px;
+    max-width: 76ch;
     padding-bottom: 70px;
     color: var(--foreground);
-    font-size: 14px;
+    font-size: 16px;
     line-height: 1.7;
   }
   .integration-markdown > h1:first-child {
@@ -135,7 +160,7 @@
   }
   .integration-markdown > p:first-of-type {
     max-width: 760px;
-    margin: -20px 0 28px;
+    margin: 0 0 28px;
     color: var(--muted-foreground);
     font-size: 16px;
   }
@@ -147,14 +172,14 @@
     font-weight: 700;
     letter-spacing: -0.025em;
     line-height: 1.2;
-    scroll-margin-top: 88px;
+    scroll-margin-top: 24px;
   }
   .integration-markdown h3 {
     margin: 34px 0 10px;
     font-size: 19px;
     font-weight: 700;
     line-height: 1.3;
-    scroll-margin-top: 88px;
+    scroll-margin-top: 24px;
   }
   .integration-markdown p {
     margin: 10px 0;

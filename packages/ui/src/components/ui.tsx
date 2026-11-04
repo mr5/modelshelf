@@ -53,7 +53,7 @@ export function PageShell({
   return (
     <div
       className={cn(
-        "min-w-0 pb-20 pt-10 sm:pt-14",
+        "min-w-0 pb-16 pt-8 sm:pb-20 sm:pt-12",
         narrow && "mx-auto w-full max-w-[760px]",
         className,
       )}
@@ -110,20 +110,22 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <div className="mb-8 flex flex-wrap items-end justify-between gap-6">
+    <div className="mb-8 flex flex-wrap items-end justify-between gap-5 border-b border-border pb-7">
       <div className="min-w-0 max-w-3xl">
         <Eyebrow>{eyebrow}</Eyebrow>
         <h1 className="text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
           {title}
         </h1>
         {description && (
-          <p className="mt-2 text-pretty leading-relaxed text-muted-foreground">
+          <p className="mt-3 max-w-[65ch] text-pretty text-sm leading-7 text-muted-foreground sm:text-base">
             {description}
           </p>
         )}
       </div>
       {actions && (
-        <div className="flex shrink-0 items-center gap-2">{actions}</div>
+        <div className="flex max-w-full flex-wrap items-center gap-2">
+          {actions}
+        </div>
       )}
     </div>
   );
@@ -140,7 +142,7 @@ export function Panel({
   return (
     <section
       className={cn(
-        "min-w-0 rounded-[28px] border border-border bg-card",
+        "min-w-0 rounded-2xl border border-border bg-card shadow-(--surface-shadow)",
         className,
       )}
     >
@@ -160,7 +162,7 @@ export function Inset({
   return (
     <div
       className={cn(
-        "rounded-2xl border border-border bg-background",
+        "min-w-0 rounded-xl border border-border bg-background",
         className,
       )}
     >
@@ -183,10 +185,10 @@ export function SectionTitle({
   return (
     <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center sm:gap-4">
       <div className="grid min-w-0 gap-1">
-        <span className="flex items-center gap-2 text-sm font-semibold [&_svg]:size-4 [&_svg]:text-muted-foreground">
+        <h2 className="flex items-center gap-2 text-sm font-semibold [&_svg]:size-4 [&_svg]:text-muted-foreground">
           {icon}
           {title}
-        </span>
+        </h2>
         {description && (
           <small className="text-xs leading-relaxed text-muted-foreground">
             {description}
@@ -208,7 +210,9 @@ export function EmptyState({
   return (
     <div className="px-6 py-16 text-center">
       <h2 className="mb-1.5 text-lg font-semibold">{title}</h2>
-      <p className="text-sm text-muted-foreground">{children}</p>
+      <div className="mx-auto max-w-md text-sm leading-relaxed text-muted-foreground">
+        {children}
+      </div>
     </div>
   );
 }

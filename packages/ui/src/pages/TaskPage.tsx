@@ -589,7 +589,7 @@ function TaskSteps({ steps }: { steps: TaskStepView[] }) {
                 index + 1
               )}
             </span>
-            <span className="max-w-full truncate text-xs font-medium">
+            <span className="max-w-full px-0.5 text-center text-xs font-medium leading-relaxed [overflow-wrap:anywhere]">
               {step.label}
             </span>
           </li>

@@ -1,4 +1,4 @@
-import { LogIn, LogOut } from "lucide-react";
+import { BookOpen, Download, Layers, LogIn, LogOut } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import {
@@ -172,10 +172,16 @@ function Shell({
         ? "/tasks"
         : location.pathname;
   useEffect(() => {
-    if (!window.location.hash) window.scrollTo({ top: 0, behavior: "instant" });
+    if (!window.location.hash) {
+      window.scrollTo({ top: 0, behavior: "instant" });
+      document.getElementById("main-content")?.focus({ preventScroll: true });
+    }
   }, [screen]);
   const [error, setError] = useState("");
+  const [loggingOut, setLoggingOut] = useState(false);
   async function logout() {
+    if (loggingOut) return;
+    setLoggingOut(true);
     setError("");
     try {
       await api("/auth/logout", { method: "POST" });
@@ -183,20 +189,30 @@ function Shell({
       navigate(publicArtifacts ? "/artifacts" : "/login");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoggingOut(false);
     }
   }
   const links = [
-    ...(authenticated ? [{ to: "/tasks", label: "Downloads" }] : []),
-    { to: "/artifacts", label: "Artifacts" },
-    { to: "/integration", label: "Integration" },
+    ...(authenticated
+      ? [{ to: "/tasks", label: "Downloads", icon: Download }]
+      : []),
+    { to: "/artifacts", label: "Artifacts", icon: Layers },
+    { to: "/integration", label: "Integration", icon: BookOpen },
   ];
   return (
     <div className="min-h-screen">
+      <a
+        href="#main-content"
+        className="fixed left-4 top-3 z-50 -translate-y-24 rounded-xl bg-primary px-4 py-3 text-sm font-medium text-primary-foreground focus:translate-y-0"
+      >
+        Skip to content
+      </a>
       <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 w-[min(1180px,calc(100%-32px))] items-center gap-3 sm:w-[min(1180px,calc(100%-48px))] sm:gap-8">
+        <div className="mx-auto flex min-h-16 w-[min(1180px,calc(100%-32px))] flex-wrap items-center gap-x-2 sm:w-[min(1180px,calc(100%-48px))] sm:flex-nowrap sm:gap-6">
           <Link
             aria-label="ModelShelf home"
-            className="flex items-center gap-2.5 font-semibold tracking-tight"
+            className="mr-auto flex min-h-16 items-center gap-2.5 font-semibold tracking-tight sm:mr-0"
             to={
               authenticated
                 ? "/tasks"
@@ -206,7 +222,7 @@ function Shell({
             }
           >
             <BrandMark />
-            <span className="hidden sm:inline">ModelShelf</span>
+            <span>ModelShelf</span>
           </Link>
           <MainNav links={links} />
           <ThemePicker />
@@ -216,6 +232,8 @@ function Shell({
               size="sm"
               className="shrink-0 px-2 sm:px-3"
               aria-label="Sign out"
+              disabled={loggingOut}
+              aria-busy={loggingOut}
               onClick={() => void logout()}
             >
               <LogOut className="size-3.5" aria-hidden />
@@ -235,7 +253,11 @@ function Shell({
           )}
         </div>
       </header>
-      <main className="mx-auto w-[min(1180px,calc(100%-32px))] sm:w-[min(1180px,calc(100%-48px))]">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="mx-auto w-[min(1180px,calc(100%-32px))] sm:w-[min(1180px,calc(100%-48px))]"
+      >
         {error && (
           <div className="pt-6">
             <ErrorBox>Sign out failed: {error}</ErrorBox>
@@ -247,15 +269,19 @@ function Shell({
   );
 }
 
-function MainNav({ links }: { links: Array<{ to: string; label: string }> }) {
+function MainNav({
+  links,
+}: {
+  links: Array<{ to: string; label: string; icon: typeof Download }>;
+}) {
   const location = useLocation();
   const reduce = useReducedMotion();
   return (
     <nav
-      className="min-w-0 flex-1 overflow-x-auto py-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      className="order-last w-full min-w-0 border-t border-border py-2 sm:order-none sm:w-auto sm:flex-1 sm:border-0 sm:py-0"
       aria-label="Primary"
     >
-      <SharedLayoutBg className="flex-row gap-0.5 sm:gap-1" inset={0}>
+      <SharedLayoutBg className="flex-row gap-1" inset={0}>
         {links.map((link) => {
           const active =
             location.pathname === link.to ||
@@ -264,14 +290,20 @@ function MainNav({ links }: { links: Array<{ to: string; label: string }> }) {
             <NavLink
               key={link.to}
               to={link.to}
-              className="block shrink-0 rounded-full text-sm font-medium text-muted-foreground transition-colors hover:text-foreground aria-[current=page]:text-foreground"
+              className="block flex-1 rounded-lg text-sm font-medium text-muted-foreground transition-colors hover:text-foreground aria-[current=page]:bg-primary/10 aria-[current=page]:text-primary sm:flex-none"
             >
-              <span className="block px-2 py-1.5 sm:px-3.5">{link.label}</span>
+              <span className="flex min-h-11 items-center justify-center gap-2 px-2 sm:px-3.5">
+                <link.icon
+                  className="hidden size-4 min-[375px]:block"
+                  aria-hidden
+                />
+                {link.label}
+              </span>
               {active && (
                 <motion.span
                   layoutId="main-nav-active"
                   transition={reduce ? { duration: 0 } : SPRING_LAYOUT}
-                  className="absolute inset-x-3 -bottom-4 h-0.5 rounded-full bg-foreground"
+                  className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-primary"
                 />
               )}
             </NavLink>

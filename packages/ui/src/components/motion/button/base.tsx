@@ -47,17 +47,18 @@ type Ripple = { id: number; x: number; y: number; size: number };
 
 const VARIANT_CLASS: Record<ButtonVariant, string> = {
   primary: "bg-primary text-primary-foreground hover:bg-primary/90",
-  secondary: "border border-border bg-card text-foreground hover:border-border",
+  secondary:
+    "border border-border bg-card text-foreground hover:bg-muted hover:border-border-strong",
   ghost: "text-muted-foreground hover:text-foreground hover:bg-muted/60",
   outline:
     "border border-border bg-transparent text-foreground hover:bg-muted/60",
 };
 
 const SIZE_CLASS: Record<ButtonSize, string> = {
-  sm: "h-8 px-3 text-xs gap-1.5 rounded-full",
-  md: "h-10 px-5 text-sm gap-2 rounded-full",
-  lg: "h-12 px-6 text-base gap-2 rounded-full",
-  icon: "h-8 w-8 rounded-lg",
+  sm: "min-h-9 px-3 text-xs gap-1.5 rounded-lg [@media(pointer:coarse)]:min-h-11",
+  md: "min-h-11 px-5 text-sm gap-2 rounded-xl",
+  lg: "min-h-12 px-6 text-base gap-2 rounded-xl",
+  icon: "h-9 w-9 shrink-0 rounded-lg [@media(pointer:coarse)]:size-11",
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
@@ -65,7 +66,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     {
       variant = "primary",
       size = "md",
-      pressScale = 0.93,
+      pressScale = 0.98,
       ripple = false,
       className,
       children,
@@ -157,7 +158,7 @@ export const ButtonLink = forwardRef<HTMLAnchorElement, ButtonLinkProps>(
     {
       variant = "primary",
       size = "md",
-      pressScale = 0.93,
+      pressScale = 0.98,
       className,
       children,
       ...rest

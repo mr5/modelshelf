@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { siGithub, siHuggingface, siKaggle, siModelscope } from "simple-icons";
 import { Button } from "@/components/motion/button/base";
 import { StatefulButton } from "@/components/motion/button/stateful";
@@ -221,12 +221,40 @@ function modelConfig(item: ArtifactSummary): string {
 export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
   const navigate = useNavigate();
   const { artifactId } = useParams<{ artifactId: string }>();
-  const [query, setQuery] = useState("");
-  const [provider, setProvider] = useState<Provider | "">("");
-  const [sort, setSort] = useState<SortOption>("created:desc");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const query = searchParams.get("q") ?? "";
+  const provider =
+    sourceOptions.find(
+      (option) => option.value === searchParams.get("provider"),
+    )?.value ?? "";
+  const sort =
+    sortOptions.find((option) => option.value === searchParams.get("sort"))
+      ?.value ?? "created:desc";
+  const listPath = `/artifacts${searchParams.size ? `?${searchParams}` : ""}`;
+  function updateFilters(values: {
+    q?: string;
+    provider?: Provider | "";
+    sort?: SortOption;
+  }) {
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        for (const [key, value] of Object.entries(values)) {
+          if (!value || (key === "sort" && value === "created:desc"))
+            next.delete(key);
+          else next.set(key, value);
+        }
+        return next;
+      },
+      { replace: true },
+    );
+  }
+  function detailPath(id: string) {
+    return `/artifacts/${encodeURIComponent(id)}${searchParams.size ? `?${searchParams}` : ""}`;
+  }
   const [items, setItems] = useState<ArtifactSummary[]>([]);
   const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const { notify } = useToast();
   const reduce = useReducedMotion();
@@ -331,7 +359,7 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
       setItems((current) =>
         current.filter((candidate) => candidate.artifactId !== item.artifactId),
       );
-      if (artifactId === item.artifactId) navigate("/artifacts");
+      if (artifactId === item.artifactId) navigate(listPath);
       notify({
         status: "success",
         title: "Artifact deleted",
@@ -405,7 +433,10 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
     artifactDetail?.summary.artifactId === shownArtifactId
       ? artifactDetail
       : undefined;
-  const closeDetail = useCallback(() => navigate("/artifacts"), [navigate]);
+  const closeDetail = useCallback(
+    () => navigate(listPath),
+    [navigate, listPath],
+  );
   const changeDetailOpen = useCallback(
     (open: boolean) => {
       if (!open) closeDetail();
@@ -419,27 +450,46 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
         title="Artifacts"
         description="Only fully verified artifacts atomically added to this shelf appear here."
       />
-      <div className="relative z-20 mb-6 grid items-end gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(260px,1fr)_220px_220px]">
+      <div className="relative z-20 mb-5 grid items-end gap-4 rounded-2xl border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-[minmax(260px,1fr)_220px_220px]">
         <Input
           className="sm:col-span-2 lg:col-span-1"
           aria-label="Search artifacts"
+          label="Search artifacts"
           placeholder="Search name, model ID or revision…"
           leftIcon={<Search />}
           value={query}
-          onChange={setQuery}
+          onChange={(q) => updateFilters({ q })}
         />
         <SelectField
           label="Source"
           value={provider}
           options={sourceOptions}
-          onChange={setProvider}
+          onChange={(provider) => updateFilters({ provider })}
         />
         <SelectField
           label="Sort"
           value={sort}
           options={sortOptions}
-          onChange={setSort}
+          onChange={(sort) => updateFilters({ sort })}
         />
+      </div>
+      <div className="mb-4 flex min-h-9 flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span role="status">
+          {loading
+            ? "Updating artifacts…"
+            : `${items.length.toLocaleString()} artifacts shown${hasMore ? " · more available" : ""}`}
+        </span>
+        {(query || provider || sort !== "created:desc") && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() =>
+              updateFilters({ q: "", provider: "", sort: "created:desc" })
+            }
+          >
+            Reset filters
+          </Button>
+        )}
       </div>
       {error && <ErrorBox className="mb-4">{error}</ErrorBox>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -462,7 +512,7 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
                 delay: Math.min(index, 8) * 0.03,
                 ease: [0.16, 1, 0.3, 1],
               }}
-              className="flex min-h-full min-w-0 flex-col rounded-[28px] border border-border bg-card p-5"
+              className="flex min-h-full min-w-0 flex-col rounded-2xl border border-border bg-card p-5 shadow-(--surface-shadow) transition-colors hover:border-border-strong"
             >
               <div className="grid gap-3">
                 <div className="grid min-w-0 gap-0.5">
@@ -502,11 +552,7 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
                         size="icon"
                         aria-label={`${item.alias ? "Change" : "Set"} alias for ${title}`}
                         title={item.alias ? "Change alias" : "Set alias"}
-                        onClick={() =>
-                          navigate(
-                            `/artifacts/${encodeURIComponent(item.artifactId)}`,
-                          )
-                        }
+                        onClick={() => navigate(detailPath(item.artifactId))}
                       >
                         <Tag className="size-4" aria-hidden />
                       </Button>
@@ -579,11 +625,7 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() =>
-                      navigate(
-                        `/artifacts/${encodeURIComponent(item.artifactId)}`,
-                      )
-                    }
+                    onClick={() => navigate(detailPath(item.artifactId))}
                   >
                     <Eye className="size-3.5" aria-hidden />
                     View details
@@ -621,7 +663,16 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
       )}
       {!loading && items.length === 0 && (
         <EmptyState title="No matching artifacts">
-          Completed downloads will appear here.
+          {query || provider
+            ? "Try a different keyword or source, or reset your filters."
+            : "Completed and verified downloads will appear here."}
+          {canManage && !query && !provider && (
+            <div className="mt-4">
+              <Button variant="outline" onClick={() => navigate("/tasks/new")}>
+                New download
+              </Button>
+            </div>
+          )}
         </EmptyState>
       )}
       <CenterMorphModal

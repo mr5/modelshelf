@@ -566,13 +566,17 @@ export function NewTaskPage() {
   return (
     <PageShell narrow>
       <Link
-        className="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+        className="mb-4 inline-flex min-h-11 items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
         to="/tasks"
       >
         <ArrowLeft className="size-4" aria-hidden />
         Downloads
       </Link>
-      <PageHeader eyebrow="New ingestion" title="Download a model" />
+      <PageHeader
+        eyebrow="New ingestion"
+        title="Download a model"
+        description="Choose a source and revision, then review availability and storage before starting."
+      />
       {serverInfoError && (
         <ErrorBox className="mb-4">
           Could not load server network settings: {serverInfoError}
@@ -583,6 +587,10 @@ export function NewTaskPage() {
         onSubmit={(event) => void submit(event)}
       >
         <Panel className="relative z-10 grid gap-5 p-5 sm:p-7">
+          <SectionTitle
+            title="1. Choose your model"
+            description="Pin a revision to keep the published artifact reproducible."
+          />
           <SelectField
             label="Source"
             value={provider}
@@ -739,6 +747,7 @@ export function NewTaskPage() {
         />
 
         <Panel className="grid gap-4 p-5 sm:p-7">
+          <SectionTitle title="2. Review the download" />
           <div aria-live="polite" className="grid gap-4">
             {estimateLookup === "idle" && (
               <SectionTitle
@@ -1054,7 +1063,7 @@ export function NewTaskPage() {
           </Notice>
         )}
         {error && <ErrorBox>{error}</ErrorBox>}
-        <div className="flex flex-wrap justify-end gap-2.5">
+        <div className="flex flex-wrap justify-end gap-3 rounded-2xl border border-border bg-card p-4 [&>button]:flex-1 sm:[&>button]:flex-none">
           <Button variant="outline" onClick={() => navigate("/tasks")}>
             Cancel
           </Button>

@@ -1111,6 +1111,7 @@ test("all screens fit small portrait and landscape layouts in both themes", asyn
           `${colorScheme} ${viewport.width}px ${path}`,
         ).toBe(true);
         await page.screenshot({
+          fullPage: path === "/artifacts",
           path: testInfo.outputPath(
             `${colorScheme}-${viewport.width}-${path.replaceAll("/", "_")}.png`,
           ),

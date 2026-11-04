@@ -230,7 +230,6 @@
     margin: 18px 0;
     padding: 16px 18px;
     border: 1px solid color-mix(in oklch, var(--warning) 35%, transparent);
-    border-left: 4px solid var(--warning);
     border-radius: 16px;
     background: color-mix(in oklch, var(--warning) 10%, transparent);
     color: var(--foreground);

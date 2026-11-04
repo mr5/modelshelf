@@ -1,5 +1,4 @@
 import { BookOpen, Download, Layers, LogIn, LogOut } from "lucide-react";
-import { motion, useReducedMotion } from "motion/react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import {
   Link,
@@ -15,7 +14,6 @@ import { Button } from "@/components/motion/button/base";
 import { ThemePicker } from "@/components/ThemePicker";
 import { SharedLayoutBg } from "@/components/motion/shared-layout-bg";
 import { BrandMark, ErrorBox, Loading, ToastProvider } from "@/components/ui";
-import { SPRING_LAYOUT } from "@/lib/ease";
 import { api } from "./api.ts";
 import { ArtifactsPage } from "./pages/ArtifactsPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
@@ -274,41 +272,27 @@ function MainNav({
 }: {
   links: Array<{ to: string; label: string; icon: typeof Download }>;
 }) {
-  const location = useLocation();
-  const reduce = useReducedMotion();
   return (
     <nav
       className="order-last w-full min-w-0 border-t border-border py-2 sm:order-none sm:w-auto sm:flex-1 sm:border-0 sm:py-0"
       aria-label="Primary"
     >
       <SharedLayoutBg className="flex-row gap-1" inset={0}>
-        {links.map((link) => {
-          const active =
-            location.pathname === link.to ||
-            location.pathname.startsWith(`${link.to}/`);
-          return (
-            <NavLink
-              key={link.to}
-              to={link.to}
-              className="block flex-1 rounded-lg text-sm font-medium text-muted-foreground transition-colors hover:text-foreground aria-[current=page]:bg-primary/10 aria-[current=page]:text-primary sm:flex-none"
-            >
-              <span className="flex min-h-11 items-center justify-center gap-2 px-2 sm:px-3.5">
-                <link.icon
-                  className="hidden size-4 min-[375px]:block"
-                  aria-hidden
-                />
-                {link.label}
-              </span>
-              {active && (
-                <motion.span
-                  layoutId="main-nav-active"
-                  transition={reduce ? { duration: 0 } : SPRING_LAYOUT}
-                  className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-primary"
-                />
-              )}
-            </NavLink>
-          );
-        })}
+        {links.map((link) => (
+          <NavLink
+            key={link.to}
+            to={link.to}
+            className="block flex-1 rounded-lg text-sm font-medium text-muted-foreground transition-colors hover:text-foreground aria-[current=page]:bg-primary/10 aria-[current=page]:text-primary sm:flex-none"
+          >
+            <span className="flex min-h-11 items-center justify-center gap-2 px-2 sm:px-3.5">
+              <link.icon
+                className="hidden size-4 min-[375px]:block"
+                aria-hidden
+              />
+              {link.label}
+            </span>
+          </NavLink>
+        ))}
       </SharedLayoutBg>
     </nav>
   );

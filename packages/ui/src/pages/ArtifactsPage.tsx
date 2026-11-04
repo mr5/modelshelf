@@ -11,7 +11,12 @@ import {
 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 import { siGithub, siHuggingface, siKaggle, siModelscope } from "simple-icons";
 import { Button } from "@/components/motion/button/base";
 import { StatefulButton } from "@/components/motion/button/stateful";
@@ -26,7 +31,6 @@ import {
   EmptyState,
   ErrorBox,
   Eyebrow,
-  Inset,
   Loading,
   MetaTile,
   PageHeader,
@@ -514,39 +518,104 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
               }}
               className="flex min-h-full min-w-0 flex-col rounded-2xl border border-border bg-card p-5 shadow-(--surface-shadow) transition-colors hover:border-border-strong"
             >
-              <div className="grid gap-3">
-                <div className="grid min-w-0 gap-0.5">
-                  <h2 className="min-w-0 text-lg font-semibold leading-tight tracking-tight [overflow-wrap:anywhere]">
+              <div className="flex min-w-0 items-center justify-between gap-3">
+                <span className="flex min-w-0 items-center gap-2 text-xs font-medium text-muted-foreground">
+                  <SourceLogo provider={item.provider} />
+                  <span className="min-w-0 [overflow-wrap:anywhere]">
+                    {providerLabel(item.provider)}
+                  </span>
+                </span>
+                <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                  <Gem className="size-3.5" aria-hidden /> Immutable
+                </span>
+              </div>
+              <div className="mt-4 min-w-0">
+                <h2 className="text-lg font-semibold leading-tight tracking-tight [overflow-wrap:anywhere]">
+                  <Link
+                    to={detailPath(item.artifactId)}
+                    className="rounded-sm transition-colors hover:text-primary"
+                  >
                     {title}
-                  </h2>
-                  {item.alias && (
-                    <span
-                      className="truncate text-xs text-muted-foreground"
-                      title={item.sourceId}
-                    >
-                      {item.name}
-                    </span>
-                  )}
-                  {sourceUrl ? (
-                    <a
-                      className="group mt-1.5 inline-flex max-w-full items-center gap-1 self-start text-[13px] text-muted-foreground transition-colors hover:text-primary"
-                      href={sourceUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <span className="truncate">{item.sourceId}</span>
-                      <ExternalLink className="size-3 shrink-0" aria-hidden />
-                    </a>
-                  ) : (
-                    <span className="mt-1.5 truncate text-[13px] text-muted-foreground">
+                  </Link>
+                </h2>
+                {item.alias && (
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+                    {item.name}
+                  </p>
+                )}
+                {sourceUrl ? (
+                  <a
+                    className="mt-1.5 inline-flex min-h-6 max-w-full items-start gap-1 text-[13px] leading-relaxed text-muted-foreground transition-colors hover:text-foreground hover:underline"
+                    href={sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <span className="min-w-0 [overflow-wrap:anywhere]">
                       {item.sourceId}
                     </span>
-                  )}
+                    <ExternalLink
+                      className="mt-1 size-3 shrink-0"
+                      aria-hidden
+                    />
+                  </a>
+                ) : (
+                  <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+                    {item.sourceId}
+                  </p>
+                )}
+              </div>
+              <dl className="my-5 grid grid-cols-2 gap-4">
+                <div className="grid min-w-0 gap-1">
+                  <dt className="text-xs text-muted-foreground">Size</dt>
+                  <dd className="text-xl font-semibold tracking-tight tabular-nums">
+                    {formatBytes(item.totalSize)}
+                  </dd>
                 </div>
-                <div className="mb-5 flex items-center justify-between gap-3">
-                  <ImmutableBadge />
+                <div className="grid min-w-0 gap-1">
+                  <dt className="text-xs text-muted-foreground">Files</dt>
+                  <dd className="text-xl font-semibold tracking-tight tabular-nums">
+                    {item.fileCount.toLocaleString()}
+                  </dd>
+                </div>
+              </dl>
+              <dl className="grid flex-1 content-start gap-3">
+                <CardFact label="Revision">
+                  <span className="[overflow-wrap:anywhere]">
+                    {item.version}
+                  </span>
+                  <code className="mt-1 block font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                    {item.resolvedRevision}
+                  </code>
+                </CardFact>
+                <CardFact label="Selection">
+                  <span className="[overflow-wrap:anywhere]">
+                    {selectionSummary(item.selectedPaths)}
+                  </span>
+                </CardFact>
+                <CardFact label="Added">
+                  <time
+                    dateTime={item.createdAt}
+                    title={new Date(item.createdAt).toLocaleString()}
+                  >
+                    {new Date(item.createdAt).toLocaleDateString(undefined, {
+                      year: "numeric",
+                      month: "short",
+                      day: "numeric",
+                    })}
+                  </time>
+                </CardFact>
+              </dl>
+              <div className="mt-5 grid gap-3">
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    className="flex-1"
+                    onClick={() => navigate(detailPath(item.artifactId))}
+                  >
+                    <Eye className="size-4" aria-hidden /> View details
+                  </Button>
                   {canManage && (
-                    <div className="flex shrink-0 items-center gap-1">
+                    <>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -566,73 +635,25 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
                         disabled={deletingArtifactId === item.artifactId}
                         onConfirm={() => deleteArtifact(item)}
                       />
-                    </div>
+                    </>
                   )}
                 </div>
-              </div>
-              <dl className="grid flex-1 content-start gap-3">
-                <CardFact label="Source">
-                  <span className="flex min-w-0 items-center gap-2 font-medium">
-                    <SourceLogo provider={item.provider} />
-                    <span className="truncate">
-                      {providerLabel(item.provider)}
-                    </span>
-                  </span>
-                </CardFact>
-                <CardFact label="Resolved revision">
-                  <span
-                    className="block truncate font-mono text-[0.87em]"
-                    title={item.resolvedRevision}
-                  >
-                    {item.resolvedRevision}
-                  </span>
-                </CardFact>
-                <CardFact label="Content">
-                  {item.fileCount.toLocaleString()} files ·{" "}
-                  {formatBytes(item.totalSize)}
-                </CardFact>
-                <CardFact label="Selection">
-                  <span
-                    className="block truncate"
-                    title={selectionSummary(item.selectedPaths)}
-                  >
-                    {selectionSummary(item.selectedPaths)}
-                  </span>
-                </CardFact>
-                <CardFact label="Added to shelf">
-                  {new Date(item.createdAt).toLocaleString()}
-                </CardFact>
-              </dl>
-              <div className="mt-5 grid gap-2.5 border-t border-border pt-4.5">
-                <Inset className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-full py-1 pl-3.5 pr-1">
-                  <code
-                    className="block min-w-0 truncate font-mono text-[11px] text-muted-foreground"
-                    title={command}
-                  >
-                    {command}
-                  </code>
+                <div className="grid grid-cols-2 gap-2">
                   <CopyButton
-                    variant="secondary"
+                    variant="ghost"
                     size="sm"
+                    className="min-w-0 px-2 [&>span]:gap-1.5"
                     value={command}
                     aria-label={`Copy modelshelf add command for ${item.name}`}
                     onCopyError={copyFailed}
+                    icon={<Copy className="size-3.5" aria-hidden />}
                   >
-                    Copy
+                    CLI command
                   </CopyButton>
-                </Inset>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => navigate(detailPath(item.artifactId))}
-                  >
-                    <Eye className="size-3.5" aria-hidden />
-                    View details
-                  </Button>
                   <CopyButton
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
+                    className="min-w-0 px-2 [&>span]:gap-1.5"
                     value={modelConfig(item)}
                     title="Copy this model entry, pinned to the resolved revision"
                     onCopyError={copyFailed}
@@ -881,9 +902,9 @@ export function ArtifactsPage({ canManage = false }: { canManage?: boolean }) {
 
 function CardFact({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="grid min-w-0 gap-1">
+    <div className="grid min-w-0 grid-cols-[72px_minmax(0,1fr)] items-baseline gap-3">
       <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 text-[13px]">{children}</dd>
+      <dd className="min-w-0 text-[13px] leading-relaxed">{children}</dd>
     </div>
   );
 }

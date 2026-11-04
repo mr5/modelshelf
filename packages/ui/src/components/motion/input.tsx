@@ -132,9 +132,8 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
         className={cn(
           "relative h-11 rounded-xl border bg-background transition-colors duration-200",
           "border-input hover:border-border-strong",
-          "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-ring",
-          focused && !hasError && "border-foreground/40 ring-2 ring-ring/40",
-          hasError && "border-destructive ring-2 ring-destructive/25",
+          focused && !hasError && "border-foreground/60 hover:border-foreground/60",
+          hasError && "border-destructive hover:border-destructive",
           disabled && "opacity-60",
           classNames?.field,
         )}
